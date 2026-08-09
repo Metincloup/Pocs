@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Owned Canva combined visual proof</title>
+  <style>
+    :root { color-scheme: dark }
+    * { box-sizing: border-box }
+    body { margin: 16px; background: #101418; color: #f1f5f9; font: 15px monospace }
+    h1 { margin: 0 0 8px }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 14px }
+    .panel { border: 1px solid #475569; padding: 12px; background: #111820 }
+    video { display: block; width: 100%; max-height: 44vh; background: #000; border: 2px solid #8b5cf6; object-fit: contain }
+    .meter { height: 28px; margin: 10px 0; border: 2px solid #64748b; background: #161b22; overflow: hidden }
+    .level { width: 0; height: 100%; background: linear-gradient(90deg,#22c55e,#eab308,#ef4444) }
+    button, pre { width: 100%; padding: 10px; font: inherit }
+    button { margin-top: 10px; border: 0; background: #8b5cf6; color: #fff; font-weight: bold }
+    button:disabled { opacity: .55 }
+    pre { margin: 8px 0 0; border: 1px solid #64748b; white-space: pre-wrap }
+    code { user-select: all }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr } }
+  </style>
+</head>
+<body>
+  <h1>canva-f007-owned-visual-combined-v2</h1>
+  <p>Automatic local A/V preview + repeatable operator-triggered clipboard display. Copy only non-secret test text. No recording, canvas, storage, network send, or upload.</p>
+  <pre id="policy"></pre>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Automatic camera + microphone</h2>
+      <video id="preview" autoplay muted playsinline></video>
+      <p>Microphone RMS level (local Web Audio analyser only)</p>
+      <div class="meter"><div id="level" class="level"></div></div>
+      <button id="stop" type="button" disabled>Stop camera and microphone now</button>
+      <pre id="mediaResult">Waiting 1500 ms before the owned-lab media request...</pre>
+    </section>
+
+    <section class="panel">
+      <h2>Repeatable clipboard read</h2>
+      <p>Copy any non-secret test text, then press the button. Each click reads the current value and displays at most 1024 characters locally.</p>
+      <button id="clipboardRun" type="button" disabled>Read and display current clipboard text</button>
+      <pre id="clipboardResult">Waiting for the automatic media request before enabling clipboard read.</pre>
+    </section>
+  </div>
+
+  <script>
+    "use strict";
+
+    const maxClipboardDisplayChars = 1024;
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    const allows = (feature) => {
+      try { return !!policy && policy.allowsFeature(feature); }
+      catch { return false; }
+    };
+
+    const camera = allows("camera");
+    const microphone = allows("microphone");
+    const clipboardRead = allows("clipboard-read");
+    const preview = document.getElementById("preview");
+    const level = document.getElementById("level");
+    const mediaResult = document.getElementById("mediaResult");
+    const clipboardResult = document.getElementById("clipboardResult");
+    const stopButton = document.getElementById("stop");
+    const clipboardButton = document.getElementById("clipboardRun");
+    let stream;
+    let audioContext;
+    let animationFrame;
+    let stopTimer;
+    let clipboardReadCount = 0;
+
+    document.getElementById("policy").textContent = [
+      `origin=${location.origin}`,
+      `camera=${camera}`,
+      `microphone=${microphone}`,
+      `clipboard-read=${clipboardRead}`,
+      `userActivation.atLoad.isActive=${navigator.userActivation?.isActive ?? "unavailable"}`,
+      `userActivation.atLoad.hasBeenActive=${navigator.userActivation?.hasBeenActive ?? "unavailable"}`,
+    ].join("\n");
+
+    async function stopAll(reason) {
+      clearTimeout(stopTimer);
+      cancelAnimationFrame(animationFrame);
+      const tracks = stream?.getTracks() || [];
+      for (const track of tracks) track.stop();
+      preview.srcObject = null;
+      level.style.width = "0";
+      if (audioContext && audioContext.state !== "closed") await audioContext.close();
+      stopButton.disabled = true;
+      mediaResult.textContent = [
+        `RESULT: devices stopped (${reason})`,
+        `videoTracks=${tracks.filter((track) => track.kind === "video").length}`,
+        `audioTracks=${tracks.filter((track) => track.kind === "audio").length}`,
+        `allTracksStopped=${tracks.every((track) => track.readyState === "ended")}`,
+        "recorded=false stored=false transmitted=false",
+      ].join("\n");
+    }
+
+    async function startMedia() {
+      if (!camera || !microphone) {
+        mediaResult.textContent = "STOP: camera/microphone delegation is false; no request made.";
+        clipboardButton.disabled = false;
+        clipboardResult.textContent = "Media request finished. Clipboard can now be read repeatedly with the button.";
+        return;
+      }
+
+      const activationBeforeMedia = {
+        isActive: navigator.userActivation?.isActive ?? "unavailable",
+        hasBeenActive: navigator.userActivation?.hasBeenActive ?? "unavailable",
+      };
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        preview.srcObject = stream;
+        await preview.play();
+
+        audioContext = new AudioContext();
+        await audioContext.resume().catch(() => {});
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        audioContext.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Uint8Array(analyser.fftSize);
+        const draw = () => {
+          analyser.getByteTimeDomainData(samples);
+          let sum = 0;
+          for (const sample of samples) {
+            const normalized = (sample - 128) / 128;
+            sum += normalized * normalized;
+          }
+          level.style.width = `${Math.min(100, Math.sqrt(sum / samples.length) * 400)}%`;
+          animationFrame = requestAnimationFrame(draw);
+        };
+        draw();
+      } catch (error) {
+        if (stream) await stopAll("preview error");
+        mediaResult.textContent = `RESULT: media rejected ${error.name}`;
+        clipboardButton.disabled = false;
+        clipboardResult.textContent = "Media request finished. Clipboard can now be read repeatedly with the button.";
+        return;
+      }
+
+      stopButton.disabled = false;
+      mediaResult.textContent = [
+        "RESULT: automatic live camera and microphone active",
+        `userActivation.beforeMedia.isActive=${activationBeforeMedia.isActive}`,
+        `userActivation.beforeMedia.hasBeenActive=${activationBeforeMedia.hasBeenActive}`,
+        `videoTracks=${stream.getVideoTracks().length}`,
+        `audioTracks=${stream.getAudioTracks().length}`,
+        `audioContext=${audioContext.state}`,
+        "recorded=false stored=false transmitted=false",
+      ].join("\n");
+      stopTimer = setTimeout(() => stopAll("30-second limit"), 30000);
+      clipboardButton.disabled = false;
+      clipboardResult.textContent = "Media request finished. Clipboard can now be read repeatedly with the button.";
+    }
+
+    clipboardButton.addEventListener("click", async () => {
+      clipboardButton.disabled = true;
+      if (!clipboardRead || !navigator.clipboard?.readText) {
+        clipboardResult.textContent = "STOP: clipboard-read delegation/API unavailable; no read made.";
+        clipboardButton.disabled = false;
+        return;
+      }
+
+      try {
+        // The media stream was already acquired automatically. If Chromium's
+        // autoplay policy suspended Web Audio, this same explicit clipboard
+        // test click only resumes the local visual meter.
+        if (audioContext?.state === "suspended") {
+          await audioContext.resume().catch(() => {});
+        }
+        let clipboardText = await navigator.clipboard.readText();
+        clipboardReadCount += 1;
+        const clipboardTextLength = clipboardText.length;
+        const displayedText = clipboardText.slice(0, maxClipboardDisplayChars);
+        clipboardText = "";
+        clipboardResult.textContent = [
+          "RESULT: clipboard read succeeded",
+          `readCount=${clipboardReadCount}`,
+          `clipboardTextLength=${clipboardTextLength}`,
+          `displayTruncated=${clipboardTextLength > maxClipboardDisplayChars}`,
+          `clipboardText=${JSON.stringify(displayedText)}`,
+          `audioMeterState=${audioContext?.state ?? "unavailable"}`,
+          "persistentStorage=false transmitted=false",
+        ].join("\n");
+      } catch (error) {
+        clipboardResult.textContent = `RESULT: clipboard read rejected ${error.name}`;
+      } finally {
+        clipboardButton.disabled = false;
+      }
+    });
+
+    stopButton.addEventListener("click", () => stopAll("manual stop"), { once: true });
+    addEventListener("pagehide", () => stopAll("page hidden"), { once: true });
+    setTimeout(startMedia, 1500);
+  </script>
+</body>
+</html>
