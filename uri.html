@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Canva owned URI activation check</title>
+<style>
+  body { font: 16px/1.45 system-ui, sans-serif; margin: 2rem; max-width: 48rem; }
+  code, pre { font-family: ui-monospace, monospace; }
+  #status { border: 1px solid #888; padding: 1rem; white-space: pre-wrap; }
+</style>
+<h1>Owned URI activation check</h1>
+<p>This page makes one automatic, harmless attempt to open the Windows About settings page. It sends no data and changes no setting.</p>
+<pre id="status">Waiting 1500 ms…</pre>
+<script>
+setTimeout(() => {
+  const frame = document.createElement("iframe");
+  frame.hidden = true;
+  frame.src = "ms-settings:about";
+  document.body.append(frame);
+  document.querySelector("#status").textContent =
+    "Attempted one hidden subframe navigation to ms-settings:about\n" +
+    "No click or user activation was requested.";
+}, 1500);
+</script>
+</html>
