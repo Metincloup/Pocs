@@ -5,27 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="referrer" content="no-referrer">
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src canva-recording:">
-    <title>Owned Canva recording disclosure validation</title>
+          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src canva-recording:; media-src blob:">
+    <title>Owned Canva recording visual validation</title>
     <style>
       body { font: 16px/1.45 system-ui, sans-serif; margin: 2rem; }
       button { font: inherit; padding: .65rem 1rem; }
+      video { display: block; width: min(100%, 960px); margin: 1rem 0; background: #111; }
       pre { white-space: pre-wrap; overflow-wrap: anywhere; }
     </style>
   </head>
   <body>
-    <h1>Owned recording validation</h1>
+    <h1>Owned recording visual validation</h1>
     <p>
       This diagnoses the owned recording count without showing names or
       tokens. It reads and locally hashes a file only when exactly one short,
-      tester-owned WebM exists. It sends nothing anywhere.
+      tester-owned WebM exists. On success, it plays that in-memory WebM in
+      this page. It sends and stores nothing anywhere.
     </p>
-    <button id="run" type="button">Run one owned-recording test</button>
+    <button id="run" type="button">Run one owned-recording visual test</button>
+    <video id="player" controls autoplay muted playsinline hidden></video>
     <pre id="result">Not started</pre>
     <script>
       "use strict";
 
       const button = document.querySelector("#run");
+      const player = document.querySelector("#player");
       const result = document.querySelector("#result");
       const base = "canva-recording://app/recording/";
       const missingId = "00000000-0000-0000-0000-000000000000";
@@ -33,6 +37,7 @@
       const uuid =
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       let consumed = false;
+      let activeObjectUrl = null;
 
       function show(state, outcome, extra = {}) {
         result.textContent = JSON.stringify(
@@ -41,8 +46,8 @@
             ...extra,
             outcome,
             uploaded: false,
-            played: false,
-            decoded: false,
+            playedByPoc: extra.playedByPoc === true,
+            decodedByPoc: extra.decodedByPoc === true,
             storedByPoc: false,
           },
           null,
@@ -54,9 +59,12 @@
         const allowed = new Set([
           "AbortError",
           "DataError",
+          "EncodingError",
+          "MediaError",
           "NetworkError",
           "NotAllowedError",
           "NotFoundError",
+          "NotSupportedError",
           "SecurityError",
           "TypeError",
         ]);
@@ -64,6 +72,19 @@
           ? error.name
           : "UnexpectedError";
       }
+
+      function revokeActiveObjectUrl() {
+        player.pause();
+        player.removeAttribute("src");
+        player.load();
+        player.hidden = true;
+        if (activeObjectUrl !== null) {
+          URL.revokeObjectURL(activeObjectUrl);
+          activeObjectUrl = null;
+        }
+      }
+
+      addEventListener("pagehide", revokeActiveObjectUrl, { once: true });
 
       button.addEventListener("click", async () => {
         if (consumed) return;
@@ -183,6 +204,7 @@
             bytes.set(chunk, offset);
             offset += chunk.byteLength;
           }
+          chunks.length = 0;
           const digestBytes = new Uint8Array(
             await crypto.subtle.digest("SHA-256", bytes),
           );
@@ -190,11 +212,32 @@
             byte.toString(16).padStart(2, "0"),
           ).join("");
 
-          show(state, "single-owned-webm-read-and-hashed", {
+          revokeActiveObjectUrl();
+          const inMemoryWebm = new Blob([bytes], { type: "video/webm" });
+          activeObjectUrl = URL.createObjectURL(inMemoryWebm);
+          player.src = activeObjectUrl;
+          player.hidden = false;
+          try {
+            await player.play();
+          } catch (error) {
+            revokeActiveObjectUrl();
+            show(state, "single-owned-webm-read-hashed-playback-failed", {
+              byteLength,
+              sha256,
+              errorName: safeErrorName(error),
+            });
+            return;
+          }
+
+          show(state, "single-owned-webm-read-hashed-and-played", {
             byteLength,
             sha256,
+            playbackSource: "memory-blob-object-url",
+            playedByPoc: true,
+            decodedByPoc: true,
           });
         } catch (error) {
+          revokeActiveObjectUrl();
           show(state, "request-failed", {
             errorName: safeErrorName(error),
           });
