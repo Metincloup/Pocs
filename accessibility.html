@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+  <title>Owned Electron WebUI host crash check</title>
+  <style>
+    body { margin: 24px; background: #11151a; color: #eef2f7; font: 16px/1.5 system-ui,sans-serif; }
+    main { max-width: 680px; margin: auto; }
+    button { padding: 12px 16px; font-weight: 700; }
+    pre { padding: 12px; background: #090c0f; border: 1px solid #445; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Owned Electron WebUI host crash check</h1>
+  <p>Close unsaved work and disconnect the test machine after this page loads. The button performs exactly one frame self-navigation.</p>
+  <button id="run" type="button">Run one accessibility-host check</button>
+  <pre id="status">READY</pre>
+</main>
+<script>
+(() => {
+  "use strict";
+  const button=document.getElementById("run");
+  const status=document.getElementById("status");
+  button.addEventListener("click",()=>{
+    button.disabled=true;
+    status.textContent="NAVIGATING_ONCE";
+    window.location.replace("http://accessibility/");
+  },{once:true});
+})();
+</script>
+</body>
+</html>
