@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canva Desktop owned-loopback WebSocket check</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: #09110f;
+      color: #e8fff5;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    main {
+      width: min(780px, 100%);
+      border: 1px solid #31564a;
+      border-radius: 14px;
+      background: #0e1c18;
+      padding: 26px;
+    }
+
+    h1 { margin-top: 0; font: 700 25px/1.25 system-ui, sans-serif; }
+    p { color: #b9cec6; line-height: 1.5; }
+
+    button {
+      width: 100%;
+      margin: 12px 0;
+      padding: 13px;
+      border: 0;
+      border-radius: 8px;
+      background: #a8f05b;
+      color: #102008;
+      font: 700 16px/1.2 system-ui, sans-serif;
+      cursor: pointer;
+    }
+
+    button:disabled { opacity: .55; cursor: wait; }
+
+    pre {
+      min-height: 230px;
+      margin: 10px 0 0;
+      padding: 16px;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+      border: 1px solid #31564a;
+      border-radius: 8px;
+      background: #07100d;
+      line-height: 1.55;
+    }
+
+    .pass { color: #a8f05b; }
+    .fail { color: #ff8f98; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Owned loopback WebSocket check</h1>
+    <p>
+      Automatic one-shot test. It connects only to the tester-owned service at
+      <code>127.0.0.1:8765</code>, sends one fixed marker, reads one fixed reply,
+      then closes. It does not scan, record, store, or upload anything.
+    </p>
+    <button id="run" type="button">Run the owned-loopback check again</button>
+    <pre id="out" aria-live="polite"></pre>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const ENDPOINT = "ws://127.0.0.1:8765/owned-ws";
+      const CLIENT_MARKER = "owned-client-marker";
+      const EXPECTED_REPLY = "owned-loopback-ws-ok";
+      const output = document.querySelector("#out");
+      const runButton = document.querySelector("#run");
+      let activeSocket = null;
+
+      function write(lines, className = "") {
+        output.className = className;
+        output.textContent = lines.join("\n");
+      }
+
+      function activationState() {
+        if (!navigator.userActivation) return "not exposed";
+        return `isActive=${navigator.userActivation.isActive}, ` +
+          `hasBeenActive=${navigator.userActivation.hasBeenActive}`;
+      }
+
+      function run() {
+        if (activeSocket && activeSocket.readyState < WebSocket.CLOSING) {
+          activeSocket.close(1000, "restarting owned test");
+        }
+
+        runButton.disabled = true;
+        const lines = [
+          `pageOrigin=${location.origin}`,
+          `target=${ENDPOINT}`,
+          `userActivation=${activationState()}`,
+          "status=CONNECTING"
+        ];
+        write(lines);
+
+        let finished = false;
+        let socket;
+        const timeout = setTimeout(() => {
+          if (finished) return;
+          finished = true;
+          lines.push("RESULT=BLOCKED_OR_TIMED_OUT");
+          write(lines, "fail");
+          runButton.disabled = false;
+          if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+        }, 5000);
+
+        try {
+          socket = new WebSocket(ENDPOINT);
+          activeSocket = socket;
+        } catch (error) {
+          clearTimeout(timeout);
+          finished = true;
+          lines.push(`RESULT=ERROR ${error.name}: ${error.message}`);
+          write(lines, "fail");
+          runButton.disabled = false;
+          return;
+        }
+
+        socket.addEventListener("open", () => {
+          lines.push("status=OPEN");
+          socket.send(CLIENT_MARKER);
+          lines.push(`sent=${CLIENT_MARKER}`);
+          write(lines);
+        });
+
+        socket.addEventListener("message", event => {
+          if (finished) return;
+          const received = String(event.data);
+          lines.push(`received=${received}`);
+          if (received === EXPECTED_REPLY) {
+            finished = true;
+            clearTimeout(timeout);
+            lines.push("RESULT=PASS_BIDIRECTIONAL_LOOPBACK_WEBSOCKET");
+            write(lines, "pass");
+            runButton.disabled = false;
+            socket.close(1000, "owned test complete");
+          } else {
+            finished = true;
+            clearTimeout(timeout);
+            lines.push("RESULT=UNEXPECTED_REPLY");
+            write(lines, "fail");
+            runButton.disabled = false;
+            socket.close(1000, "unexpected owned reply");
+          }
+        });
+
+        socket.addEventListener("error", () => {
+          if (finished) return;
+          lines.push("status=WEBSOCKET_ERROR");
+          write(lines, "fail");
+        });
+
+        socket.addEventListener("close", event => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          lines.push(`status=CLOSED code=${event.code}`);
+          lines.push("RESULT=BLOCKED_OR_CLOSED_BEFORE_REPLY");
+          write(lines, "fail");
+          runButton.disabled = false;
+        });
+      }
+
+      runButton.addEventListener("click", run);
+      if (document.readyState === "loading") {
+        window.addEventListener("DOMContentLoaded", () => setTimeout(run, 250), {
+          once: true
+        });
+      } else {
+        setTimeout(run, 250);
+      }
+    })();
+  </script>
+</body>
+</html>
