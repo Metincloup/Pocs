@@ -563,6 +563,7 @@
       };
 
       const targetSockets = new Map();
+      const predictionText = new Map();
       const logEntries = [];
       let controller = null;
       let controllerSequence = 0;
@@ -809,6 +810,79 @@
         return Uint8Array.from(binary, character => character.charCodeAt(0));
       }
 
+      function modelSummary(model) {
+        if (!model || typeof model !== "object") return model;
+        const summary = {};
+        for (const key of [
+          "type", "modelKey", "displayName", "path", "sizeBytes", "identifier",
+          "architecture", "contextLength", "maxContextLength"
+        ]) {
+          if (key in model) summary[key] = model[key];
+        }
+        return summary;
+      }
+
+      function summarizeTextReply(channel, data) {
+        let message;
+        try { message = JSON.parse(data); }
+        catch { return { channel, type: "text", data }; }
+
+        if (message && message.success === true && Object.keys(message).length === 1) {
+          return { channel, type: "authentication", success: true };
+        }
+        if (!message || typeof message !== "object") return { channel, type: "json", data: message };
+
+        if (message.type === "rpcResult") {
+          const result = Array.isArray(message.result)
+            ? message.result.map(modelSummary)
+            : message.result;
+          return { channel, type: "rpcResult", callId: message.callId, result };
+        }
+        if (message.type === "rpcError") {
+          return { channel, type: "rpcError", callId: message.callId, error: message.error };
+        }
+        if (message.type === "channelSend" && message.message && typeof message.message === "object") {
+          const channelId = Number(message.channelId);
+          const inner = message.message;
+          const key = `${channel}:${channelId}`;
+          if (inner.type === "promptProcessingProgress") {
+            return { channel, channelId, type: "promptProgress", progress: inner.progress };
+          }
+          if (inner.type === "fragment") {
+            const delta = inner.fragment && typeof inner.fragment.content === "string"
+              ? inner.fragment.content
+              : "";
+            const content = (predictionText.get(key) || "") + delta;
+            predictionText.set(key, content);
+            return { channel, channelId, type: "stream", delta, content };
+          }
+          if (inner.type === "success") {
+            const stats = {};
+            for (const name of [
+              "stopReason", "tokensPerSecond", "timeToFirstTokenSec", "totalTimeSec",
+              "promptTokensCount", "predictedTokensCount", "totalTokensCount"
+            ]) {
+              if (inner.stats && name in inner.stats) stats[name] = inner.stats[name];
+            }
+            const content = predictionText.get(key) || "";
+            predictionText.delete(key);
+            return {
+              channel,
+              channelId,
+              type: "inferenceComplete",
+              content,
+              model: modelSummary(inner.modelInfo),
+              stats
+            };
+          }
+          return { channel, channelId, type: "channelMessage", message: inner };
+        }
+        if (message.type === "channelClose" || message.type === "channelError") {
+          predictionText.delete(`${channel}:${Number(message.channelId)}`);
+        }
+        return { channel, type: message.type || "json", message };
+      }
+
       function closeTarget(channel, code = 1000, reason = "operator close") {
         const normalized = validateChannel(channel);
         const socket = targetSockets.get(normalized);
@@ -852,7 +926,7 @@
               const byteLength = new TextEncoder().encode(event.data).byteLength;
               if (byteLength > MAX_TEXT_FRAME_BYTES) throw new Error(`text reply exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
               const payload = { channel, dataType: "text", byteLength, data: event.data };
-              nodes.wsOutput.textContent = formatJson(payload);
+              nodes.wsOutput.textContent = formatJson(summarizeTextReply(channel, event.data));
               const relayed = sendController({ type: "target.event", event: "message", ...payload });
               log(
                 "WS",
@@ -899,6 +973,9 @@
 
         socket.addEventListener("close", event => {
           if (targetSockets.get(channel) === socket) targetSockets.delete(channel);
+          for (const key of [...predictionText.keys()]) {
+            if (key.startsWith(`${channel}:`)) predictionText.delete(key);
+          }
           renderChannels();
           if (socket.__pocHadError && targetSockets.size === 0) {
             setPill(nodes.wsStatus, "WS target failed", "error");
