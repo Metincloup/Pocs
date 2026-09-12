@@ -1,34 +1,65 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned subframe print renderer survival check</title>
+<title>Owned SpeechRecognition renderer survival check</title>
 <style>
   body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
-  iframe { display: block; width: 420px; height: 180px; margin: 1rem 0; border: 1px solid #888; }
-  pre { min-height: 6rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
+  pre { min-height: 8rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
 </style>
-<h1>Subframe print renderer survival check</h1>
+<h1>SpeechRecognition renderer survival check</h1>
 <p>
-  Calls <code>iframe.contentWindow.print()</code> once after a user click. If a
-  normal print dialog appears, cancel it. The page does not print automatically
-  and does not repeat the call.
+  One bounded API call. It does not request microphone permission, start
+  recognition, install a language pack, transmit data, or repeat automatically.
 </p>
-<iframe id="printTarget" title="Owned inert print target"
-  srcdoc="<!doctype html><meta charset='utf-8'><title>Owned inert print target</title><p>Owned inert print target</p>"></iframe>
 <button id="run" type="button">Run once</button>
 <pre id="out">Not run.</pre>
 <script>
   const button = document.querySelector('#run');
   const output = document.querySelector('#out');
-  const frame = document.querySelector('#printTarget');
 
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     button.disabled = true;
-    output.textContent = JSON.stringify({
-      outcome: 'print-called-once',
-      target: 'owned-srcdoc-subframe',
+    const Speech = globalThis.SpeechRecognition;
+    const result = {
+      speechRecognitionType: typeof Speech,
+      availableType: typeof Speech?.available,
+      requestedMicrophone: false,
+      startedRecognition: false,
+      installedAnything: false,
       transmittedAnything: false,
-    }, null, 2);
-    frame.contentWindow.print();
+    };
+
+    if (typeof Speech?.available !== 'function') {
+      output.textContent = JSON.stringify({ ...result, outcome: 'api-unavailable' }, null, 2);
+      return;
+    }
+
+    output.textContent = JSON.stringify({ ...result, outcome: 'calling-once' }, null, 2);
+    try {
+      const value = await Speech.available({
+        langs: ['en-US'],
+        processLocally: true,
+      });
+      output.textContent = JSON.stringify({
+        ...result,
+        outcome: 'renderer-survived',
+        value,
+      }, null, 2);
+    } catch (error) {
+      output.textContent = JSON.stringify({
+        ...result,
+        outcome: 'renderer-survived-with-error',
+        error: {
+          name: String(error?.name || 'Error'),
+          message: String(error?.message || error).slice(0, 300),
+        },
+      }, null, 2);
+    }
   }, { once: true });
+
+  // Terminal harness only. The ordinary hosted PoC has no query and therefore
+  // remains a one-click gate.
+  if (new URLSearchParams(location.search).get('harness') === '1') {
+    setTimeout(() => button.click(), 100);
+  }
 </script>
