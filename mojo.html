@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Owned subframe print renderer survival check</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
+  button { padding: .75rem 1rem; font: inherit; }
+  iframe { display: block; width: 420px; height: 180px; margin: 1rem 0; border: 1px solid #888; }
+  pre { min-height: 6rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
+</style>
+<h1>Subframe print renderer survival check</h1>
+<p>
+  Calls <code>iframe.contentWindow.print()</code> once after a user click. If a
+  normal print dialog appears, cancel it. The page does not print automatically
+  and does not repeat the call.
+</p>
+<iframe id="printTarget" title="Owned inert print target"
+  srcdoc="<!doctype html><meta charset='utf-8'><title>Owned inert print target</title><p>Owned inert print target</p>"></iframe>
+<button id="run" type="button">Run once</button>
+<pre id="out">Not run.</pre>
+<script>
+  const button = document.querySelector('#run');
+  const output = document.querySelector('#out');
+  const frame = document.querySelector('#printTarget');
+
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    output.textContent = JSON.stringify({
+      outcome: 'print-called-once',
+      target: 'owned-srcdoc-subframe',
+      transmittedAnything: false,
+    }, null, 2);
+    frame.contentWindow.print();
+  }, { once: true });
+</script>
