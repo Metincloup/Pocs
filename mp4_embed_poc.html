@@ -1,20 +1,20 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned MP4 metadata crash candidate</title>
+<title>Owned benign MP4 metadata control</title>
 <style>
   body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
   pre { min-height: 12rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
   video { display: block; width: 160px; height: 100px; margin-top: 1rem; background: #222; }
 </style>
-<h1>MP4 metadata crash candidate</h1>
-<p>The 1,267-byte candidate is embedded in this HTML. It is never played.</p>
-<button id="run" type="button">Load candidate metadata once</button>
+<h1>Benign MP4 metadata control</h1>
+<p>The 1,267-byte control is embedded in this HTML. It is never played.</p>
+<button id="run" type="button">Load control metadata once</button>
 <pre id="out">Ready.</pre>
 <div id="media"></div>
 <script>
-  const fixtureBase64 = 'AAAAGGZ0eXBtcDQyASoAfm1wNDJpc29tAAAACGZyZWUAAAGVbWRhdAAAAHhliIBAAGtv/vfUt8yy8CAitguo96JpS+Cu3Fec17PZ1ufxFoY+O5PyW3SbHheqaWGKdNZqLdmyhMPM7OWrA4Eu62fM5//3k9lDJf5H4RxSZa399HdeDKvMlvbt47BpXVuT4b4h7dyKSKY/aT4ezkSaUMF5GAIl4ZAAAAACCTAAAAA2QZoCDfIb6AZqAICg1t+sIf71TApS7TeWCSOV/5Vf1dOiT4TCTtSlgy+pSb6QOizjx5st9r6fAAAAAglQAAAADwGeBAXRBjb/2N4/9NBdwAAAAAIJUAAAAA8BngQJ0QY2/9jeP/TQXcAAAAACCTAAAAAOQZoEHV8mCDW3/tqmWREAAAACCVAAAAALQZ4GFaYgzt8ADLgAAAACCVAAAAALAZ4IEdkGNv8AEjAAAAACCVAAAAALAZ4IGaZBjb8AEjAAAAACCTAAAAAPQZoIKNLRMBBrb/7aplkRAAAAAglQAAAACwGeCiGmQY2/ABIwAAAAAglQAAAACwGeCiWmQY2/ABIwAAAAAQoAAAM+bW9vdgAAAGxtdmhkAAAAANCLYQDQi2EAAAFfkAABX5AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAsp0cmFrAAAAXHRraGQAAAAH0IthANCLYQAAAAABAAAAAAABX5AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAADAAAACQAAAAAAJmbWRpYQAAACBtZGhkAAAAANCLYQDQi2EAAAAADAAAAAwVxwAAAAAANGhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlbyBNZWRpYSBIYW5kbGVyAAAAAgptaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAHKc3RibAAAAKJzdHNkAAAAAAAAAAEAAACSYXZjMQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAwAJAASAAAAEgAAAAAAAAAAQpBVkMgQ29kaW5nAAAAAAAAAAAAAAAAAAAAAAAAAAAAABj//wAAADxhdmNDAWRAFP/hACRnZAAUrCykMTsBUgwMDIAAAAMAgAAADHBAB9ADIfjHB2hIllgBAAVo63NSUAAAABhzdHRzAAAAAAAAAAEAAAAMAAAAAQAAAGBjdHRzAAAAAAAAAAoAAAABAAAAAQAAAAEAAAADAAAAAgAAAAAAAAABAAAABAAAAAEAAAABAAAAAf////8AAAABAAAAAAAAAAEAAAADAAAAAgAAAAAAAAAB/////wAAADRzdHNjAAAAAAAAAAMAAAABAAAABQAAAAEAAAACAAAABAAAAAEAAAADAAAAAwAAAAEAAABEc3RzegAAAAAAAAAAAAAADAAAAHwAAABAAAAAGQAAABkAAAAYAAAAFQAAABUAAAAVAAAAGQAAABUAAAAVAAAABQAAABxzdGNvAAAAAAAAAAMAAAAoAAABLgAAAYYAAAAUc3RzcwAAAAAgAAABAAAAAQ==';
-  const expectedHash = '0afba19b139181d7df4fd82de3c18e8b30c156cebd257aa470584095928360b3';
+  const fixtureBase64 = 'AAAAGGZ0eXBtcDQyASoAfm1wNDJpc29tAAAACGZyZWUAAAGVbWRhdAAAAHhliIBAAGtv/vfUt8yy8CAitguo96JpS+Cu3Fec17PZ1ufxFoY+O5PyW3SbHheqaWGKdNZqLdmyhMPM7OWrA4Eu62fM5//3k9lDJf5H4RxSZa399HdeDKvMlvbt47BpXVuT4b4h7dyKSKY/aT4ezkSaUMF5GAIl4ZAAAAACCTAAAAA2QZoCDfIb6AZqAICg1t+sIf71TApS7TeWCSOV/5Vf1dOiT4TCTtSlgy+pSb6QOizjx5st9r6fAAAAAglQAAAADwGeBAXRBjb/2N4/9NBdwAAAAAIJUAAAAA8BngQJ0QY2/9jeP/TQXcAAAAACCTAAAAAOQZoEHV8mCDW3/tqmWREAAAACCVAAAAALQZ4GFaYgzt8ADLgAAAACCVAAAAALAZ4IEdkGNv8AEjAAAAACCVAAAAALAZ4IGaZBjb8AEjAAAAACCTAAAAAPQZoIKNLRMBBrb/7aplkRAAAAAglQAAAACwGeCiGmQY2/ABIwAAAAAglQAAAACwGeCiWmQY2/ABIwAAAAAQoAAAM+bW9vdgAAAGxtdmhkAAAAANCLYQDQi2EAAAFfkAABX5AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAsp0cmFrAAAAXHRraGQAAAAH0IthANCLYQAAAAABAAAAAAABX5AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAADAAAACQAAAAAAJmbWRpYQAAACBtZGhkAAAAANCLYQDQi2EAAAAADAAAAAwVxwAAAAAANGhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlbyBNZWRpYSBIYW5kbGVyAAAAAgptaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAHKc3RibAAAAKJzdHNkAAAAAAAAAAEAAACSYXZjMQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAwAJAASAAAAEgAAAAAAAAAAQpBVkMgQ29kaW5nAAAAAAAAAAAAAAAAAAAAAAAAAAAAABj//wAAADxhdmNDAWRAFP/hACRnZAAUrCykMTsBUgwMDIAAAAMAgAAADHBAB9ADIfjHB2hIllgBAAVo63NSUAAAABhzdHRzAAAAAAAAAAEAAAAMAAAAAQAAAGBjdHRzAAAAAAAAAAoAAAABAAAAAQAAAAEAAAADAAAAAgAAAAAAAAABAAAABAAAAAEAAAABAAAAAf////8AAAABAAAAAAAAAAEAAAADAAAAAgAAAAAAAAAB/////wAAADRzdHNjAAAAAAAAAAMAAAABAAAABQAAAAEAAAACAAAABAAAAAEAAAADAAAAAwAAAAEAAABEc3RzegAAAAAAAAAAAAAADAAAAHwAAABAAAAAGQAAABkAAAAYAAAAFQAAABUAAAAVAAAAGQAAABUAAAAVAAAABQAAABxzdGNvAAAAAAAAAAMAAAAoAAABLgAAAYYAAAAUc3RzcwAAAAAAAAABAAAAAQ==';
+  const expectedHash = '776187c861620a13e3599f0b28fd9e3e9e19ba19ea7d2959d66a8e1a132f069f';
   const button = document.querySelector('#run');
   const output = document.querySelector('#out');
   const media = document.querySelector('#media');
@@ -32,19 +32,19 @@
       show({ outcome: 'fixture-integrity-failed', byteLength: bytes.length, sha256 });
       return;
     }
-    show({ outcome: 'loading-candidate-metadata-once', byteLength: bytes.length, sha256, played: false });
+    show({ outcome: 'loading-control-metadata-once', byteLength: bytes.length, sha256, played: false });
     const video = document.createElement('video');
     video.muted = true;
     video.preload = 'metadata';
     video.playsInline = true;
     const url = URL.createObjectURL(new Blob([bytes], { type: 'video/mp4' }));
     video.addEventListener('loadedmetadata', () => show({
-      outcome: 'candidate-survived-loadedmetadata', byteLength: bytes.length, sha256,
+      outcome: 'control-survived-loadedmetadata', byteLength: bytes.length, sha256,
       duration: Number.isFinite(video.duration) ? video.duration : null,
       width: video.videoWidth, height: video.videoHeight, played: false,
     }), { once: true });
     video.addEventListener('error', () => show({
-      outcome: 'candidate-survived-media-error', byteLength: bytes.length, sha256,
+      outcome: 'control-survived-media-error', byteLength: bytes.length, sha256,
       mediaErrorCode: video.error?.code ?? null, played: false,
     }), { once: true });
     media.append(video);
