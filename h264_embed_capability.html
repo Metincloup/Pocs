@@ -1,83 +1,67 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned H.264 hardware decode capability check</title>
+<title>Owned WebGL copy-texture capability check</title>
 <style>
   body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
-  pre { min-height: 15rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
+  pre { min-height: 16rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
 </style>
-<h1>H.264 hardware decode capability check</h1>
+<h1>WebGL copy-texture capability check</h1>
 <p>
-  Capability queries only. This page creates no decoder, supplies no media
-  bytes, requests no device permission and performs no network transfer.
+  Reads extension and renderer strings only. It creates no texture, performs no
+  copy, draw or readback, and transmits nothing.
 </p>
 <button id="run" type="button">Check capability</button>
 <pre id="out">Ready.</pre>
 <script>
   const button = document.querySelector('#run');
   const output = document.querySelector('#out');
-  const clean = value => JSON.parse(JSON.stringify(value));
 
-  button.addEventListener('click', async () => {
+  button.addEventListener('click', () => {
     button.disabled = true;
-    const result = {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    if (!gl) {
+      output.textContent = JSON.stringify({ outcome: 'no-webgl2' }, null, 2);
+      return;
+    }
+
+    const names = gl.getSupportedExtensions() || [];
+    const debug = gl.getExtension('WEBGL_debug_renderer_info');
+    const requested = {};
+    for (const name of [
+      'WEBGL_copy_texture',
+      'CHROMIUM_copy_texture',
+      'GL_CHROMIUM_copy_texture',
+    ]) {
+      try {
+        const extension = gl.getExtension(name);
+        requested[name] = extension ? {
+          available: true,
+          methods: Object.getOwnPropertyNames(Object.getPrototypeOf(extension))
+            .filter(method => method !== 'constructor'),
+        } : { available: false, methods: [] };
+      } catch (error) {
+        requested[name] = {
+          available: false,
+          methods: [],
+          error: String(error?.message || error).slice(0, 200),
+        };
+      }
+    }
+
+    output.textContent = JSON.stringify({
       outcome: 'capability-check-complete',
       userAgent: navigator.userAgent,
-      videoDecoderType: typeof globalThis.VideoDecoder,
-      mediaCapabilitiesType: typeof navigator.mediaCapabilities,
-      createdDecoder: false,
-      suppliedMediaBytes: false,
-      requestedDevicePermission: false,
+      webglVersion: gl.getParameter(gl.VERSION),
+      debugRendererInfo: Boolean(debug),
+      unmaskedRenderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
+      matchingSupportedExtensions: names.filter(name => /copy|chromium/i.test(name)),
+      requested,
+      createdTexture: false,
+      copiedTexture: false,
+      drewPixels: false,
+      readPixels: false,
       transmittedAnything: false,
-      webCodecs: {},
-      mediaCapabilities: null,
-      errors: [],
-    };
-
-    const base = {
-      codec: 'avc1.42E00A',
-      codedWidth: 32,
-      codedHeight: 32,
-      optimizeForLatency: true,
-    };
-
-    if (typeof globalThis.VideoDecoder?.isConfigSupported === 'function') {
-      for (const hardwareAcceleration of ['prefer-hardware', 'prefer-software']) {
-        try {
-          result.webCodecs[hardwareAcceleration] = clean(
-            await VideoDecoder.isConfigSupported({ ...base, hardwareAcceleration }),
-          );
-        } catch (error) {
-          result.errors.push({
-            surface: `VideoDecoder.${hardwareAcceleration}`,
-            name: String(error?.name || 'Error'),
-            message: String(error?.message || error).slice(0, 300),
-          });
-        }
-      }
-    }
-
-    if (typeof navigator.mediaCapabilities?.decodingInfo === 'function') {
-      try {
-        result.mediaCapabilities = clean(await navigator.mediaCapabilities.decodingInfo({
-          type: 'file',
-          video: {
-            contentType: 'video/mp4; codecs="avc1.42E00A"',
-            width: 32,
-            height: 32,
-            bitrate: 128000,
-            framerate: 30,
-          },
-        }));
-      } catch (error) {
-        result.errors.push({
-          surface: 'mediaCapabilities.decodingInfo',
-          name: String(error?.name || 'Error'),
-          message: String(error?.message || error).slice(0, 300),
-        });
-      }
-    }
-
-    output.textContent = JSON.stringify(result, null, 2);
+    }, null, 2);
   }, { once: true });
 </script>
