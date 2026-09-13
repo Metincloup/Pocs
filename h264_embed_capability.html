@@ -1,14 +1,17 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned WebGL texture-level control</title>
+<title>Owned WebGL texture-level candidate</title>
 <style>
   body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
   pre { min-height: 14rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
 </style>
-<h1>WebGL texture-level control</h1>
-<p>One empty texture and valid level parameters. No storage, upload, draw or readback.</p>
-<button id="run" type="button">Run control once</button>
+<h1>WebGL texture-level candidate</h1>
+<p>
+  Sets the two upstream regression parameter values on one empty texture. No
+  storage, upload, draw or readback.
+</p>
+<button id="run" type="button">Run candidate once</button>
 <pre id="out">Ready.</pre>
 <script>
   const button = document.querySelector('#run');
@@ -23,11 +26,16 @@
     const debug = gl.getExtension('WEBGL_debug_renderer_info');
     const texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+    output.textContent = JSON.stringify({
+      outcome: 'issuing-candidate-parameters',
+      baseLevel: 1416354905,
+      maxLevel: 800,
+    }, null, 2);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 1416354905);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 800);
     gl.finish();
     output.textContent = JSON.stringify({
-      outcome: 'control-returned',
+      outcome: 'candidate-returned',
       baseLevel: gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL),
       maxLevel: gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL),
       glError: gl.getError(),
