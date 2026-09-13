@@ -1,86 +1,56 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned ANGLE sampler-name collision candidate</title>
+<title>Canva Desktop I010 single-frame gate</title>
 <style>
-  body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
-  button { padding: .75rem 1rem; font: inherit; }
-  pre { min-height: 17rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
+  body { font: 14px system-ui; margin: 24px; color: #18212f; }
+  button { padding: 10px 16px; }
+  video { display: block; width: 160px; height: 160px; margin: 16px 0; background: #222; }
+  pre { white-space: pre-wrap; border: 1px solid #aab4c3; padding: 12px; }
 </style>
-<h1>ANGLE sampler-name collision candidate</h1>
-<p>Exact upstream collision shape: one small shader, one draw and one-pixel readback.</p>
-<button id="run" type="button">Run candidate once</button>
-<pre id="out">Ready.</pre>
+<h1>I010 single-frame conversion gate</h1>
+<p>One synthetic 16×16 VP9 Profile 2 frame. No permissions, recording, network, storage, or upload.</p>
+<button id="run">Run once</button>
+<video id="video" muted playsinline></video>
+<pre id="out">idle</pre>
 <script>
-  const fragmentShader = `
-precision highp float;
-struct S { sampler2D s; };
-uniform struct A {
-  vec4 v;
-  S a;
-  sampler2D a_s;
-} a;
-void main() {
-  gl_FragColor = a.v;
-}`;
+const payload = "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAIFEU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHWTbuMU6uEElTDZ1OsggEyTbuMU6uEHFO7a1OsggHv7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsCrXsYMPQkBNgIxMYXZmNjMuMS4xMDFXQYxMYXZmNjMuMS4xMDFEiYhAj0AAAAAAABZUrmvXrgEAAAAAAABO14EBc8WIOHyfehigK9ucgQAitZyDdW5kiIEAhoVWX1ZQOYOBASPjg4Q7msoA4JCwgRC6gRCagQJVsIRVuYEBVe6BAOwBAAAAAAAAAgAAElTDZ/5zc59jwIBnyJlFo4dFTkNPREVSRIeMTGF2ZjYzLjEuMTAxc3PZY8CLY8WIOHyfehigK9tnyKRFo4dFTkNPREVSRIeXTGF2YzYzLjEuMTAxIGxpYnZweC12cDlnyKFFo4hEVVJBVElPTkSHkzAwOjAwOjAxLjAwMDAwMDAwMAAfQ7Z1teeBAKOwgQAAgJJJg0IAAHgAewAcEg4MAAAAEAAAEL////JhogDH////7vTDh////9v13wAAHFO7a5G7j7OBALeK94EB8YIBtfCBAw==";
+const video = document.querySelector('#video');
+const output = document.querySelector('#out');
+const button = document.querySelector('#run');
+let ran = false;
 
-  const button = document.querySelector('#run');
-  const output = document.querySelector('#out');
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    const gl = document.createElement('canvas').getContext('webgl', {
-      alpha: true,
-      antialias: false,
-      preserveDrawingBuffer: true,
+async function run() {
+  if (ran) return;
+  ran = true;
+  button.disabled = true;
+  const result = { width: 16, height: 16, codec: 'VP9 Profile 2', frames: 1 };
+  let objectUrl;
+  try {
+    const bytes = Uint8Array.from(atob(payload), character => character.charCodeAt(0));
+    result.byteLength = bytes.byteLength;
+    objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'video/webm' }));
+    video.src = objectUrl;
+    await new Promise((resolve, reject) => {
+      video.addEventListener('loadeddata', resolve, { once: true });
+      video.addEventListener('error', () => reject(video.error || new Error('video error')), { once: true });
+      setTimeout(() => reject(new Error('load timeout')), 3000);
     });
-    if (!gl) {
-      output.textContent = JSON.stringify({ outcome: 'no-webgl' }, null, 2);
-      return;
-    }
-    const debug = gl.getExtension('WEBGL_debug_renderer_info');
-    const compile = (type, source) => {
-      const shader = gl.createShader(type);
-      gl.shaderSource(shader, source);
-      gl.compileShader(shader);
-      return shader;
-    };
-    const vertex = compile(gl.VERTEX_SHADER,
-      'attribute vec4 a_position; void main(){ gl_Position = a_position; }');
-    const fragment = compile(gl.FRAGMENT_SHADER, fragmentShader);
-    const program = gl.createProgram();
-    gl.attachShader(program, vertex);
-    gl.attachShader(program, fragment);
-    gl.linkProgram(program);
-    const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
-    let pixel = [];
-    if (linked) {
-      gl.useProgram(program);
-      const buffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-      gl.bufferData(gl.ARRAY_BUFFER,
-        new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-      const position = gl.getAttribLocation(program, 'a_position');
-      gl.enableVertexAttribArray(position);
-      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      const bytes = new Uint8Array(4);
-      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
-      pixel = [...bytes];
-      bytes.fill(0);
-    }
-    gl.finish();
-    output.textContent = JSON.stringify({
-      outcome: 'candidate-returned',
-      vertexCompiled: gl.getShaderParameter(vertex, gl.COMPILE_STATUS),
-      fragmentCompiled: gl.getShaderParameter(fragment, gl.COMPILE_STATUS),
-      vertexLog: gl.getShaderInfoLog(vertex).slice(0, 300),
-      fragmentLog: gl.getShaderInfoLog(fragment).slice(0, 300),
-      linked,
-      linkLog: gl.getProgramInfoLog(program).slice(0, 300),
-      pixel,
-      glError: gl.getError(),
-      renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
-      uploadedData: false,
-      transmittedAnything: false,
-    }, null, 2);
-  }, { once: true });
+    result.videoWidth = video.videoWidth;
+    result.videoHeight = video.videoHeight;
+    result.readyState = video.readyState;
+    result.outcome = 'single-frame-decoded-and-loaded';
+  } catch (error) {
+    result.outcome = 'exception';
+    result.error = `${error.name}: ${error.message}`;
+  } finally {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    output.textContent = JSON.stringify(result, null, 2);
+    console.log('I010_VIDEO_RESULT ' + JSON.stringify(result));
+  }
+}
+
+button.addEventListener('click', run, { once: true });
 </script>
