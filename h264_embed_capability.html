@@ -1,14 +1,14 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned ANGLE sampler-name control</title>
+<title>Owned ANGLE sampler-name collision candidate</title>
 <style>
   body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
   pre { min-height: 17rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
 </style>
-<h1>ANGLE sampler-name control</h1>
-<p>One small shader, one draw and one-pixel readback. The colliding field is renamed.</p>
-<button id="run" type="button">Run control once</button>
+<h1>ANGLE sampler-name collision candidate</h1>
+<p>Exact upstream collision shape: one small shader, one draw and one-pixel readback.</p>
+<button id="run" type="button">Run candidate once</button>
 <pre id="out">Ready.</pre>
 <script>
   const fragmentShader = `
@@ -17,7 +17,7 @@ struct S { sampler2D s; };
 uniform struct A {
   vec4 v;
   S a;
-  sampler2D safe_sampler_name;
+  sampler2D a_s;
 } a;
 void main() {
   gl_FragColor = a.v;
@@ -69,7 +69,7 @@ void main() {
     }
     gl.finish();
     output.textContent = JSON.stringify({
-      outcome: 'control-returned',
+      outcome: 'candidate-returned',
       vertexCompiled: gl.getShaderParameter(vertex, gl.COMPILE_STATUS),
       fragmentCompiled: gl.getShaderParameter(fragment, gl.COMPILE_STATUS),
       vertexLog: gl.getShaderInfoLog(vertex).slice(0, 300),
