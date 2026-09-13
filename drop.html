@@ -1,0 +1,108 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Owned cross-site drop boundary probe</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
+  #dropzone { min-height: 180px; display: grid; place-items: center; padding: 1rem;
+    border: 3px dashed #7c3aed; border-radius: 16px; background: #f5f3ff; text-align: center; }
+  #dropzone.active { background: #dcfce7; border-color: #15803d; }
+  pre { min-height: 18rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<h1>Cross-site drop boundary probe</h1>
+<p>Owned marker expected in the Canva design: <code>DT01-OWNED-20260913</code></p>
+<div id="dropzone">Drag the owned Canva text/element here once</div>
+<pre id="out">Waiting for one drag.</pre>
+<script>
+  const marker = 'DT01-OWNED-20260913';
+  const dropzone = document.querySelector('#dropzone');
+  const output = document.querySelector('#out');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const saltHex = [...salt].map(value => value.toString(16).padStart(2, '0')).join('');
+  const events = [];
+  let completed = false;
+
+  const digest = async value => {
+    const bytes = new TextEncoder().encode(`${saltHex}:${value}`);
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    bytes.fill(0);
+    return [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, '0')).join('');
+  };
+
+  const recordEvent = event => {
+    events.push(event.type);
+    if (events.length > 12) events.shift();
+  };
+
+  for (const name of ['dragenter', 'dragover', 'dragleave']) {
+    dropzone.addEventListener(name, event => {
+      event.preventDefault();
+      recordEvent(event);
+      dropzone.classList.toggle('active', name !== 'dragleave');
+      output.textContent = JSON.stringify({
+        outcome: 'drag-event-observed',
+        events,
+        transmittedAnything: false,
+        stored: false,
+      }, null, 2);
+    });
+  }
+
+  dropzone.addEventListener('drop', async event => {
+    event.preventDefault();
+    if (completed) return;
+    completed = true;
+    recordEvent(event);
+    dropzone.classList.remove('active');
+
+    const transfer = event.dataTransfer;
+    const types = [...(transfer?.types || [])];
+    const values = [];
+    const readableTypes = new Set([
+      'text/plain',
+      'text/html',
+      'text/uri-list',
+      'application/x-canva',
+    ]);
+
+    for (const type of types) {
+      if (!readableTypes.has(type)) {
+        values.push({ type, inspected: false });
+        continue;
+      }
+      let raw = '';
+      try { raw = transfer.getData(type) || ''; } catch (error) {
+        values.push({
+          type,
+          inspected: true,
+          readable: false,
+          error: String(error?.name || 'Error'),
+        });
+        continue;
+      }
+      values.push({
+        type,
+        inspected: true,
+        readable: raw.length > 0,
+        byteLength: new TextEncoder().encode(raw).length,
+        saltedSha256: await digest(raw),
+        containsOwnedMarker: raw.includes(marker),
+      });
+      raw = '';
+    }
+
+    output.textContent = JSON.stringify({
+      outcome: 'drop-complete',
+      origin: location.origin,
+      events,
+      types,
+      values,
+      fileCount: transfer?.files?.length || 0,
+      itemCount: transfer?.items?.length || 0,
+      anyReadableValue: values.some(value => value.readable),
+      ownedMarkerRecovered: values.some(value => value.containsOwnedMarker),
+      rawValuesDisplayed: false,
+      transmittedAnything: false,
+      stored: false,
+    }, null, 2);
+  }, { once: true });
+</script>
