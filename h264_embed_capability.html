@@ -1,22 +1,18 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned WebGL copy-texture capability check</title>
+<title>Owned WebGL texture-level control</title>
 <style>
   body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; }
   button { padding: .75rem 1rem; font: inherit; }
-  pre { min-height: 16rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
+  pre { min-height: 14rem; padding: 1rem; border: 1px solid #888; white-space: pre-wrap; }
 </style>
-<h1>WebGL copy-texture capability check</h1>
-<p>
-  Reads extension and renderer strings only. It creates no texture, performs no
-  copy, draw or readback, and transmits nothing.
-</p>
-<button id="run" type="button">Check capability</button>
+<h1>WebGL texture-level control</h1>
+<p>One empty texture and valid level parameters. No storage, upload, draw or readback.</p>
+<button id="run" type="button">Run control once</button>
 <pre id="out">Ready.</pre>
 <script>
   const button = document.querySelector('#run');
   const output = document.querySelector('#out');
-
   button.addEventListener('click', () => {
     button.disabled = true;
     const gl = document.createElement('canvas').getContext('webgl2');
@@ -24,44 +20,24 @@
       output.textContent = JSON.stringify({ outcome: 'no-webgl2' }, null, 2);
       return;
     }
-
-    const names = gl.getSupportedExtensions() || [];
     const debug = gl.getExtension('WEBGL_debug_renderer_info');
-    const requested = {};
-    for (const name of [
-      'WEBGL_copy_texture',
-      'CHROMIUM_copy_texture',
-      'GL_CHROMIUM_copy_texture',
-    ]) {
-      try {
-        const extension = gl.getExtension(name);
-        requested[name] = extension ? {
-          available: true,
-          methods: Object.getOwnPropertyNames(Object.getPrototypeOf(extension))
-            .filter(method => method !== 'constructor'),
-        } : { available: false, methods: [] };
-      } catch (error) {
-        requested[name] = {
-          available: false,
-          methods: [],
-          error: String(error?.message || error).slice(0, 200),
-        };
-      }
-    }
-
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+    gl.finish();
     output.textContent = JSON.stringify({
-      outcome: 'capability-check-complete',
-      userAgent: navigator.userAgent,
-      webglVersion: gl.getParameter(gl.VERSION),
-      debugRendererInfo: Boolean(debug),
-      unmaskedRenderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
-      matchingSupportedExtensions: names.filter(name => /copy|chromium/i.test(name)),
-      requested,
-      createdTexture: false,
-      copiedTexture: false,
+      outcome: 'control-returned',
+      baseLevel: gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL),
+      maxLevel: gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL),
+      glError: gl.getError(),
+      renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+      allocatedTextureStorage: false,
+      uploadedData: false,
       drewPixels: false,
       readPixels: false,
       transmittedAnything: false,
     }, null, 2);
+    gl.deleteTexture(texture);
   }, { once: true });
 </script>
