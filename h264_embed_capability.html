@@ -1,30 +1,49 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Owned D3D11 robust-initialization check</title>
-<style>body{font:16px system-ui;max-width:850px;margin:2rem auto;padding:0 1rem}button{padding:.8rem 1rem;font:inherit}pre{white-space:pre-wrap;border:1px solid #888;padding:1rem}</style>
-<h1>Owned D3D11 robust-initialization check</h1>
-<p>Reads only sixteen fresh 64×64 test textures, reports counts, and uploads or stores nothing.</p>
-<button id="run">Run once</button><pre id="out">Not run.</pre>
+<title>Owned ANGLE constructor-size validation</title>
+<style>
+  body { font: 16px system-ui; max-width: 850px; margin: 2rem auto; padding: 0 1rem; }
+  button { padding: .8rem 1rem; font: inherit; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #888; padding: 1rem; }
+</style>
+<h1>Owned ANGLE constructor-size validation</h1>
+<p>This compiles one generated shader, reports the result, and performs no draw, readback, storage, upload, or external request.</p>
+<button id="run">Compile bounded shader once</button>
+<pre id="out">Not run.</pre>
 <script>
-run.onclick=()=>{
-  run.disabled=true;
-  const gl=document.createElement('canvas').getContext('webgl2');
-  if(!gl){out.textContent=JSON.stringify({outcome:'no-webgl2'},null,2);return;}
-  const debug=gl.getExtension('WEBGL_debug_renderer_info');
-  const w=64,h=64,loops=16;let nonZero=0,total=0,maxByte=0;
-  for(let i=0;i<loops;i++){
-    const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
-    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
-    const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
-    gl.invalidateFramebuffer(gl.FRAMEBUFFER,[gl.COLOR_ATTACHMENT0]);
-    const bytes=new Uint8Array(w*h*4);gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,bytes);
-    for(const value of bytes){total++;if(value!==0)nonZero++;if(value>maxByte)maxByte=value;}
-    bytes.fill(0);gl.deleteFramebuffer(fbo);gl.deleteTexture(tex);
+run.onclick = () => {
+  run.disabled = true;
+  const gl = document.createElement('canvas').getContext('webgl2');
+  if (!gl) { out.textContent = JSON.stringify({outcome:'no-webgl2'}, null, 2); return; }
+  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+  const N1 = 1024, N2 = 1024, N3 = 64;
+  const lines = ['#version 300 es', 'precision highp float;',
+    'struct S1 { mat4 m[' + N1 + ']; };', 'struct S2 {'];
+  for (let i = 0; i < N2; i++) lines.push('S1 m' + i + ';');
+  lines.push('};', 'struct S3 {');
+  for (let i = 0; i < N3; i++) lines.push('S2 m' + i + ';');
+  lines.push('};', 'out vec4 color;', 'void main(){', 'S1 s1;', 'color = S3(');
+  for (let i = 0; i < N3; i++) {
+    lines.push('S2(' + new Array(N2).fill('s1').join(',') + ')' + (i + 1 === N3 ? '' : ','));
   }
-  out.textContent=JSON.stringify({outcome:'read-complete',loops,width:w,height:h,totalBytes:total,
-    nonZeroBytes:nonZero,maxByte,glError:gl.getError(),
-    renderer:debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),
-    rawBytesDisplayed:false,uploaded:false,stored:false},null,2);
+  lines.push(').m0.m0.m[0][0];', '}');
+  const source = lines.join('\n');
+  const shader = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(shader, source);
+  const started = performance.now();
+  gl.compileShader(shader);
+  out.textContent = JSON.stringify({
+    outcome: 'compile-returned',
+    sourceLength: source.length,
+    logicalTemporaryBytes: 4294967296,
+    compileStatus: gl.getShaderParameter(shader, gl.COMPILE_STATUS),
+    glError: gl.getError(),
+    infoLog: gl.getShaderInfoLog(shader).slice(0, 300),
+    elapsedMs: Math.round(performance.now() - started),
+    renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    uploaded: false,
+    drawn: false,
+    readback: false
+  }, null, 2);
 };
 </script>
