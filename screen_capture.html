@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src blob:; frame-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Owned Canva legacy screen-capture check</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, monospace }
+    * { box-sizing: border-box }
+    body { margin: 0; padding: 20px; background: #0b1117; color: #edf4fb }
+    main { width: min(960px, 100%); margin: auto }
+    h1 { margin: 0 0 8px; font-size: clamp(22px, 4vw, 36px) }
+    .notice { margin: 0 0 14px; color: #b9c8d7 }
+    .capture { position: relative; min-height: 260px; border: 2px solid #8b5cf6; background: #020617 }
+    video { display: block; width: 100%; max-height: 58vh; min-height: 260px; object-fit: contain; background: #020617 }
+    .badge { position: absolute; top: 12px; left: 12px; padding: 7px 10px; background: #991b1b; color: #fff; font-weight: 700 }
+    .countdown { position: absolute; top: 12px; right: 12px; padding: 7px 10px; background: #111827dd }
+    pre { min-height: 118px; margin: 14px 0 0; padding: 12px; border: 1px solid #475569; background: #111820; white-space: pre-wrap; overflow-wrap: anywhere }
+    button { width: 100%; margin-top: 12px; padding: 12px; border: 0; background: #7c3aed; color: #fff; font: inherit; font-weight: 700 }
+    button:disabled { opacity: .55 }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Owned screen-capture boundary check</h1>
+    <p class="notice">One automatic legacy desktop request. Live local preview only; no recording, persistence, or transmission. The stream stops after 25 seconds.</p>
+    <div class="capture">
+      <video id="preview" autoplay muted playsinline></video>
+      <div id="badge" class="badge">STARTING</div>
+      <div id="countdown" class="countdown">25 s maximum</div>
+    </div>
+    <button id="stop" type="button" disabled>Stop screen stream now</button>
+    <pre id="status">Waiting 1200 ms before the single owned-lab request...</pre>
+  </main>
+  <script>
+    "use strict";
+
+    const automaticStopMilliseconds = 25000;
+    const preview = document.getElementById("preview");
+    const badge = document.getElementById("badge");
+    const countdown = document.getElementById("countdown");
+    const status = document.getElementById("status");
+    const stopButton = document.getElementById("stop");
+    let stream = null;
+    let stopTimer = 0;
+    let countdownTimer = 0;
+    let deadline = 0;
+    let stopped = false;
+    let resolvedProof = null;
+
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    const displayCaptureDelegated = (() => {
+      try { return policy ? policy.allowsFeature("display-capture") : "unavailable"; }
+      catch { return "unavailable"; }
+    })();
+
+    function show(value) {
+      status.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    }
+
+    function stopAll(reason) {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(stopTimer);
+      clearInterval(countdownTimer);
+      const tracks = stream ? stream.getTracks() : [];
+      for (const track of tracks) track.stop();
+      preview.srcObject = null;
+      stopButton.disabled = true;
+      badge.textContent = "STOPPED";
+      badge.style.background = "#334155";
+      countdown.textContent = "0 s";
+      show({
+        ...(resolvedProof || {}),
+        outcome: "stopped",
+        captureOutcome: resolvedProof ? "legacy-desktop-capture-resolved" : "not-resolved",
+        reason,
+        sourceId: "screen:-1:0",
+        trackCount: tracks.length,
+        allTracksStopped: tracks.every((track) => track.readyState === "ended"),
+        previewLocalOnly: true,
+        recorded: false,
+        stored: false,
+        transmitted: false
+      });
+    }
+
+    stopButton.addEventListener("click", () => stopAll("manual stop"), { once: true });
+    addEventListener("pagehide", () => stopAll("page hidden"), { once: true });
+
+    async function runSingleRequest() {
+      const activationBeforeRequest = {
+        isActive: navigator.userActivation ? navigator.userActivation.isActive : "unavailable",
+        hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : "unavailable"
+      };
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: "desktop",
+              chromeMediaSourceId: "screen:-1:0",
+              maxWidth: 1280,
+              maxHeight: 720,
+              maxFrameRate: 5
+            }
+          }
+        });
+      } catch (error) {
+        badge.textContent = "REQUEST FAILED";
+        badge.style.background = "#92400e";
+        countdown.textContent = "not active";
+        show({
+          outcome: "request-failed",
+          sourceId: "screen:-1:0",
+          displayCaptureDelegated,
+          activationBeforeRequest,
+          errorName: error && error.name ? error.name : "Error",
+          errorMessage: error && error.message ? error.message : String(error),
+          recorded: false,
+          stored: false,
+          transmitted: false
+        });
+        return;
+      }
+
+      const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
+      const track = videoTracks[0] || null;
+      if (!track) {
+        stopAll("resolved stream had no video track");
+        return;
+      }
+      preview.srcObject = stream;
+      let previewPlayResult = "resolved";
+      try { await preview.play(); }
+      catch (error) { previewPlayResult = `${error.name}: ${error.message}`; }
+
+      badge.textContent = "LIVE LOCAL PREVIEW";
+      deadline = Date.now() + automaticStopMilliseconds;
+      countdownTimer = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        countdown.textContent = `${remaining} s remaining`;
+      }, 250);
+      stopTimer = setTimeout(() => stopAll("25-second limit"), automaticStopMilliseconds);
+      stopButton.disabled = false;
+
+      resolvedProof = {
+        outcome: "legacy-desktop-capture-resolved",
+        sourceId: "screen:-1:0",
+        origin: location.origin,
+        displayCaptureDelegated,
+        activationBeforeRequest,
+        videoTracks: videoTracks.length,
+        audioTracks: audioTracks.length,
+        trackKind: track ? track.kind : null,
+        trackLabel: track ? track.label : null,
+        trackSettings: track ? track.getSettings() : null,
+        previewPlayResult,
+        automaticStopSeconds: automaticStopMilliseconds / 1000,
+        previewLocalOnly: true,
+        recorded: false,
+        stored: false,
+        transmitted: false
+      };
+      show(resolvedProof);
+    }
+
+    setTimeout(runSingleRequest, 1200);
+  </script>
+</body>
+</html>
